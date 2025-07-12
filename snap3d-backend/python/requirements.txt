@@ -1,0 +1,26 @@
+# Python requirements for Snap3D backend - Simplified
+
+# Image processing and computer vision
+opencv-python==4.8.1.78
+numpy==1.24.3
+Pillow==10.0.0
+
+# 3D processing and mesh handling
+open3d==0.19.0
+trimesh==3.23.5
+
+# Additional requirements for 3D modeling
+scipy==1.11.1
+imageio==2.31.1
+
+# Mesh processing and repair
+pymeshlab==2022.2.post3
+
+# Image feature detection
+scikit-image==0.21.0
+
+# Progress tracking
+tqdm==4.65.0
+
+# System monitoring
+psutil==5.9.5
