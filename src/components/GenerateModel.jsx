@@ -1,5 +1,6 @@
 import React from 'react';
 import { Loader2, CheckCircle, Zap, Cpu } from 'lucide-react';
+import { useEffect } from 'react';
 
 export default function GenerateModel({
   uploadType,
@@ -15,6 +16,12 @@ export default function GenerateModel({
   backendUp,
   processingSteps,
 }) {
+
+  useEffect(() => {
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}, []);
+  // Ensure the component scrolls to the top when mounted
+  
   return (
     <div className="w-full max-w-none mx-auto">
       <div className="bg-white rounded-2xl shadow-xl border border-gray-100">

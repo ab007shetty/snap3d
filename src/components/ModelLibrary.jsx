@@ -13,6 +13,24 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
   const [previewModel, setPreviewModel] = useState(null);
   const [showFullPreview, setShowFullPreview] = useState(false);
 
+  // Get model file URL - consistent with backend structure
+  const getModelFileUrl = (model) => {
+    if (!model || !model.id || !model.processor) return null;
+    
+    const processor = model.processor;
+    let fileName = null;
+    
+    if (model.objFiles && model.objFiles.length > 0) {
+      fileName = model.objFiles[0].filename;
+    } else if (processor === "open3d" || processor === "meshroom") {
+      fileName = "texturedMesh.obj";
+    } else {
+      fileName = model.fileName || `${model.name}.obj`;
+    }
+    
+    return `http://localhost:3001/models/${processor}/${model.id}/${fileName}`;
+  };
+
   const filtered = savedModels
     .filter(m =>
       m.name.toLowerCase().includes(searchTerm.toLowerCase()) &&
@@ -38,32 +56,7 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
     }
   };
 
-  // FIXED: Consistent URL generation function with proper filename handling
-  const getModelFileUrl = (model) => {
-    if (!model) return null;
-    
-    // If it's already a proper URL or blob, use it
-    if (model.fileUrl && (model.fileUrl.startsWith('http') || model.fileUrl.startsWith('blob:'))) {
-      return model.fileUrl;
-    }
-    
-    // Get the actual filename from objFiles array
-    let fileName = null;
-    if (model.objFiles && model.objFiles.length > 0) {
-      fileName = model.objFiles[0].filename;
-    } else if (model.fileName) {
-      fileName = model.fileName;
-    } else {
-      fileName = `${model.name}.obj`;
-    }
-    
-    const processorFolder = model.processor || 'import';
-    
-    // Use consistent URL structure with correct filename
-    return `http://localhost:3001/models/${processorFolder}/${model.id}/${fileName}`;
-  };
-
-  // FIXED: Download function with proper filename
+  // Download function with proper filename
   const download = (model) => {
     const fileUrl = getModelFileUrl(model);
     if (!fileUrl) {
@@ -75,10 +68,10 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
     let downloadFileName = null;
     if (model.objFiles && model.objFiles.length > 0) {
       downloadFileName = model.objFiles[0].filename;
-    } else if (model.fileName) {
-      downloadFileName = model.fileName;
+    } else if (model.processor === "open3d" || model.processor === "meshroom") {
+      downloadFileName = "texturedMesh.obj";
     } else {
-      downloadFileName = `${model.name}.obj`;
+      downloadFileName = model.fileName || `${model.name}.obj`;
     }
     
     const link = document.createElement('a');
@@ -117,7 +110,7 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
     }
   };
 
-  // FIXED: Preview function with proper filename handling
+  // Preview function with proper filename handling
   const handlePreview = (model) => {
     const fileUrl = getModelFileUrl(model);
     if (!fileUrl) {
@@ -129,10 +122,10 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
     let actualFileName = null;
     if (model.objFiles && model.objFiles.length > 0) {
       actualFileName = model.objFiles[0].filename;
-    } else if (model.fileName) {
-      actualFileName = model.fileName;
+    } else if (model.processor === "open3d" || model.processor === "meshroom") {
+      actualFileName = "texturedMesh.obj";
     } else {
-      actualFileName = `${model.name}.obj`;
+      actualFileName = model.fileName || `${model.name}.obj`;
     }
     
     const previewModelData = {

@@ -18,6 +18,24 @@ export default function EnhancedModelPreviewModal({ model, onClose }) {
   const [autoRotate, setAutoRotate] = useState(true);
   const [wireframe, setWireframe] = useState(false);
 
+  // Get model file URL - consistent with backend structure
+  const getModelFileUrl = (model) => {
+    if (!model || !model.id || !model.processor) return null;
+    
+    const processor = model.processor;
+    let fileName = null;
+    
+    if (model.objFiles && model.objFiles.length > 0) {
+      fileName = model.objFiles[0].filename;
+    } else if (processor === "open3d" || processor === "meshroom") {
+      fileName = "texturedMesh.obj";
+    } else {
+      fileName = model.fileName || `${model.name}.obj`;
+    }
+    
+    return `http://localhost:3001/models/${processor}/${model.id}/${fileName}`;
+  };
+
   useEffect(() => {
     if (!mountRef.current) return;
 
@@ -174,31 +192,33 @@ export default function EnhancedModelPreviewModal({ model, onClose }) {
       
       renderer.dispose();
     };
-  }, [model.fileUrl, autoRotate]);
+  }, [model, autoRotate]);
 
   const loadModel = async () => {
     try {
       setIsLoading(true);
       setError(null);
 
-      console.log('Loading model from URL:', model.fileUrl); // Debug log
+      // Use the model's fileUrl if available, otherwise generate it
+      const modelUrl = model.fileUrl || getModelFileUrl(model);
+      console.log('Loading model from URL:', modelUrl); // Debug log
 
-      if (!model.fileUrl) {
+      if (!modelUrl) {
         throw new Error('No model URL available');
       }
 
       // Fetch the model file
       let objText;
-      if (model.fileUrl.startsWith('blob:')) {
+      if (modelUrl.startsWith('blob:')) {
         // Handle blob URL
-        const response = await fetch(model.fileUrl);
+        const response = await fetch(modelUrl);
         if (!response.ok) {
           throw new Error(`Failed to fetch blob: ${response.status} ${response.statusText}`);
         }
         objText = await response.text();
       } else {
         // Handle regular URL
-        const response = await fetch(model.fileUrl);
+        const response = await fetch(modelUrl);
         if (!response.ok) {
           throw new Error(`Failed to load model: ${response.status} ${response.statusText}`);
         }
@@ -328,10 +348,25 @@ export default function EnhancedModelPreviewModal({ model, onClose }) {
   };
 
   const downloadModel = () => {
+    const modelUrl = model.fileUrl || getModelFileUrl(model);
+    if (!modelUrl) return;
+    
+    // Get the proper filename for download
+    let downloadFileName = null;
+    if (model.objFiles && model.objFiles.length > 0) {
+      downloadFileName = model.objFiles[0].filename;
+    } else if (model.processor === "open3d" || model.processor === "meshroom") {
+      downloadFileName = "texturedMesh.obj";
+    } else {
+      downloadFileName = model.fileName || `${model.name}.obj`;
+    }
+    
     const link = document.createElement('a');
-    link.href = model.fileUrl;
-    link.download = model.name;
+    link.href = modelUrl;
+    link.download = downloadFileName;
+    document.body.appendChild(link);
     link.click();
+    document.body.removeChild(link);
   };
 
   const resetView = () => {

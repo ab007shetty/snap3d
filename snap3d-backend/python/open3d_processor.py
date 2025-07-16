@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-Bullet-proof Open3D processor
-- Resizes every image to the SAME size (keeps aspect)
-- Runs stereo → point-cloud → mesh
-- Never crashes on input size mismatch
+Open3D processor – single output: texturedMesh.obj
+Keeps your original logic, but removes every PLY / extra file write.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import traceback
 from pathlib import Path
@@ -59,7 +56,6 @@ class SafeOpen3DProcessor:
                 raise ValueError("Need at least 2 images")
 
             # 1. Resize to the same size ------------------------------------ #
-            # Use the size of the first image as canonical
             h0, w0 = cv2.imread(str(self.images[0])).shape[:2]
             rgbs = self._load_and_resize((w0, h0))
 
@@ -98,11 +94,6 @@ class SafeOpen3DProcessor:
             pcd.colors = o3d.utility.Vector3dVector(colors.reshape(-1, 3) / 255.0)
             pcd = pcd.voxel_down_sample(0.02)
 
-            ply_path = self.out / "point_cloud.ply"
-            o3d.io.write_point_cloud(str(ply_path), pcd)
-
-            update_status("processing", 80)
-
             # 5. Mesh ------------------------------------------------------- #
             pcd.estimate_normals()
             mesh, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
@@ -111,10 +102,14 @@ class SafeOpen3DProcessor:
             mesh.remove_degenerate_triangles()
             mesh.remove_duplicated_vertices()
 
-            # Center and add vertex colors
-            mesh.scale(1 / np.linalg.norm(mesh.get_max_bound() - mesh.get_min_bound()), center=mesh.get_center())
-            mesh.paint_uniform_color([0.8, 0.8, 0.8])  # light grey fallback
+            # 6. Center and color ----------------------------------------- #
+            mesh.scale(
+                1 / np.linalg.norm(mesh.get_max_bound() - mesh.get_min_bound()),
+                center=mesh.get_center(),
+            )
+            mesh.paint_uniform_color([0.8, 0.8, 0.8])
 
+            # 7. Save only OBJ -------------------------------------------- #
             obj_path = self.out / "texturedMesh.obj"
             o3d.io.write_triangle_mesh(str(obj_path), mesh)
 

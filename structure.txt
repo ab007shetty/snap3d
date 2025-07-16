@@ -11,12 +11,6 @@
 |-- snap3d-backend
 |   |-- models
 |   |   |-- import
-|   |   |   |-- 6912656c-268b-4ebb-852e-265b309d3d83
-|   |   |   |   |-- 1752611819812-e0657ae0-36ca-41f2-881f-ff2393635ff6.obj
-|   |   |   |   +-- status.json
-|   |   |   +-- a6e87a10-c20c-43a3-8965-9b8420559cb7
-|   |   |       |-- 1752612046992-c24bd6b0-0080-47cf-b160-45729cd6e6df.obj
-|   |   |       +-- status.json
 |   |   |-- meshroom
 |   |   +-- open3d
 |   |-- package-lock.json
@@ -29,6 +23,7 @@
 |   |-- temp
 |   |-- uploads
 |   +-- utils
+|       |-- cleanUp.js
 |       +-- fileUtils.js
 |-- src
 |   |-- App.jsx

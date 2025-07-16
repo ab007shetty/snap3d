@@ -101,31 +101,34 @@ export default function Snap3d() {
       const infoJson = await (await fetch(`http://localhost:3001/api/models/${modelId}`)).json();
       const files = await fetchModelFiles(modelId);
       const file = files.find(f => ['obj', 'stl', 'ply'].includes(f.extension));
-      const fileUrl = file ? `http://localhost:3001/models/import/${modelId}/${file.name}` : null;
+      const fileUrl = file ? `http://localhost:3001/models/${processor}/${modelId}/${file.name}` : null;
 
-      /* build final model object WITH stats */
-      const newModel = {
-        id: modelId,
-        name: modelName || `Model_${Date.now()}`,
-        fileUrl,
-        format: file?.extension?.toUpperCase() || null,
-        files,
-        thumbnail: infoJson.images?.[0]?.filename
-          ? `http://localhost:3001/uploads/${infoJson.images[0].filename}`
-          : selectedImages[0]?.url || '/placeholder-3d.png',
-        createdAt: new Date().toISOString(),
-        imageCount: selectedImages.length,
-        objCount: selectedObjFiles.length,
-        processor: uploadType === 'images' ? processor : 'import',
-        type: uploadType,
-        /* new stats */
-        vertices: infoJson.vertices || 0,
-        triangles: infoJson.triangles || 0,
-        sizeX: infoJson.sizeX || 0,
-        sizeY: infoJson.sizeY || 0,
-        sizeZ: infoJson.sizeZ || 0,
-        size: file?.size || 0,
-      };
+    const newModel = {
+      id: modelId,
+      name: infoJson.name || modelName || `Model_${Date.now()}`,
+      fileUrl,
+      format: file?.extension?.toUpperCase() || null,
+      files,
+      thumbnail: infoJson.images?.[0]?.filename
+        ? `http://localhost:3001/uploads/${infoJson.images[0].filename}`
+        : selectedImages[0]?.url || '/placeholder-3d.png',
+      createdAt: new Date().toISOString(),
+      imageCount: infoJson.images?.length || selectedImages.length,
+      objCount: infoJson.objFiles?.length || selectedObjFiles.length,
+      processor: infoJson.processor,
+      type: infoJson.processor === 'import' ? 'import' : 'images',
+
+      /* keep the backend data */
+      objFiles: infoJson.objFiles || [],
+
+      /* new stats */
+      vertices: infoJson.vertices || 0,
+      triangles: infoJson.triangles || 0,
+      sizeX: infoJson.sizeX || 0,
+      sizeY: infoJson.sizeY || 0,
+      sizeZ: infoJson.sizeZ || 0,
+      size: file?.size || 0,
+    };
 
       setGenerated3DModel(newModel);
       

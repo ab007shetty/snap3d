@@ -38,22 +38,28 @@ export default function ModelResult({
   const modelObjectRef = useRef(null);
   const animationIdRef = useRef(null);
 
-  // Generate proper file URL based on model structure
+  useEffect(() => {
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}, []);
+
+  // Get model file URL - consistent with backend structure
   const getModelFileUrl = (model) => {
-    if (!model) return null;
+    if (!model || !model.id || !model.processor) return null;
     
-    // If it's already a proper URL or blob, use it
-    if (model.fileUrl && (model.fileUrl.startsWith('http') || model.fileUrl.startsWith('blob:'))) {
-      return model.fileUrl;
+    const processor = model.processor;
+    let fileName = null;
+    
+    if (model.objFiles && model.objFiles.length > 0) {
+      fileName = model.objFiles[0].filename;
+    } else if (processor === "open3d" || processor === "meshroom") {
+      fileName = "texturedMesh.obj";
+    } else {
+      fileName = model.fileName || `${model.name}.obj`;
     }
     
-    // Generate URL based on your backend structure
-    const fileName = model.fileName || `${model.name}.obj`;
-    const processorFolder = model.processor || 'import';
-    
-    // Use consistent URL structure
-    return `http://localhost:3001/models/${processorFolder}/${model.id}/${fileName}`;
+    return `http://localhost:3001/models/${processor}/${model.id}/${fileName}`;
   };
+
 
   useEffect(() => {
     if (!mountRef.current || !generated3DModel) return;
@@ -381,7 +387,7 @@ export default function ModelResult({
       <div className="bg-white rounded-2xl shadow-xl border border-gray-100">
         {/* Header */}
 <div className="border-b border-gray-200 px-8 py-6">
-  <div className="flex items-center justify-between">
+  <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
     {/* Left: Title and subtitle */}
     <div>
       <div className="flex items-center space-x-3 mb-2">
@@ -392,8 +398,8 @@ export default function ModelResult({
           {isLibraryView ? 'Model Preview' : '3D Model Ready'}
         </h1>
       </div>
-      <p className="text-gray-600">
-        {isLibraryView ? 'Previewing' : 'Your 3D model'} "{generated3DModel.name}" 
+      <p className="hidden sm:block text-gray-600">
+        {isLibraryView ? 'Previewing' : 'Your 3D model'} "{generated3DModel.name}"
         {isLibraryView ? '' : ' is ready for preview'}
       </p>
     </div>
@@ -402,7 +408,7 @@ export default function ModelResult({
     {!isLibraryView && (
       <button
         onClick={onNewModel}
-        className="flex items-center space-x-2 px-6 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition font-medium"
+        className="hidden sm:flex items-center space-x-2 px-6 py-3 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition font-medium w-fit"
       >
         <Sparkles className="w-5 h-5" />
         <span>Generate New Model</span>
@@ -452,7 +458,7 @@ export default function ModelResult({
               </div>
 
               {/* 3D Viewer Controls */}
-              <div className="absolute top-4 left-4 bg-white/90 backdrop-blur-sm rounded-lg p-2 shadow-lg">
+              <div className="hidden sm:block absolute top-4 left-4 bg-white/90 backdrop-blur-sm rounded-lg p-2 shadow-lg">
                 <div className="flex items-center space-x-2 text-sm text-gray-600">
                   <span>Click and drag to rotate</span>
                   <span>•</span>

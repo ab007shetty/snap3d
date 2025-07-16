@@ -13,6 +13,10 @@ const helmet = require("helmet");
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Function to clean up temporary folders
+const { cleanupTempFolders } = require("./utils/cleanUp.js");
+cleanupTempFolders();
+
 // --- middleware ---
 app.use(helmet());
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
@@ -28,6 +32,14 @@ app.use(express.json());
 app.use(
   "/models/import",
   express.static(path.join(__dirname, "models", "import"))
+);
+app.use(
+  "/models/open3d",
+  express.static(path.join(__dirname, "models", "open3d"))
+);
+app.use(
+  "/models/meshroom",
+  express.static(path.join(__dirname, "models", "meshroom"))
 );
 
 // --- multer config ---
