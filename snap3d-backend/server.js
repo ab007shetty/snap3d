@@ -1,461 +1,322 @@
+/* eslint-disable no-console */
 const express = require("express");
-const multer = require("multer");
 const cors = require("cors");
+const multer = require("multer");
 const path = require("path");
-const { spawn } = require("child_process");
-const fs = require("fs").promises;
-const FileUtils = require("./utils/fileUtils");
+const fs = require("fs-extra");
 const { v4: uuidv4 } = require("uuid");
+const { spawn } = require("child_process");
+const archiver = require("archiver");
+const rateLimit = require("express-rate-limit");
+const helmet = require("helmet");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
-app.use(cors());
+// --- middleware ---
+app.use(helmet());
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
+app.use(
+  cors({
+    origin: ["http://localhost:5173", "http://localhost:3000"],
+    credentials: true,
+  })
+);
 app.use(express.json());
-app.use(express.static("public"));
 
-// Serve static files (models, uploads)
-app.use("/models", express.static(path.join(__dirname, "models")));
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+// NEW: serve direct model files
+app.use(
+  "/models/import",
+  express.static(path.join(__dirname, "models", "import"))
+);
 
-// Configure multer for file uploads
+// --- multer config ---
 const storage = multer.diskStorage({
-  destination: async (req, file, cb) => {
-    const uploadDir = path.join(__dirname, "uploads");
-    await FileUtils.ensureDirectory(uploadDir);
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueName = `${Date.now()}-${uuidv4()}${path.extname(
-      file.originalname
-    )}`;
-    cb(null, uniqueName);
-  },
+  destination: (_, __, cb) => cb(null, path.join(__dirname, "Uploads")),
+  filename: (_, file, cb) =>
+    cb(null, `${Date.now()}-${uuidv4()}${path.extname(file.originalname)}`),
 });
 
 const upload = multer({
   storage,
-  limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB per file
-    files: 50, // Maximum 50 files
-  },
-  fileFilter: (req, file, cb) => {
-    if (FileUtils.validateImageFile(file)) {
-      cb(null, true);
-    } else {
-      cb(new Error("Invalid file type or size"), false);
-    }
-  },
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: (_, file, cb) =>
+    cb(
+      null,
+      /(image\/.*|\.obj)$/i.test(file.mimetype) ||
+        /\.(obj|ply|stl)$/i.test(file.originalname)
+    ),
 });
 
-// In-memory storage for models (replace with database later)
-let models = [];
+// --- model paths ---
+const ROOT_MODELS = path.join(__dirname, "models");
+fs.ensureDirSync(ROOT_MODELS);
+["meshroom", "open3d", "import"].forEach((dir) =>
+  fs.ensureDirSync(path.join(ROOT_MODELS, dir))
+);
 
-// Initialize models file
-const initializeModels = async () => {
-  try {
-    const modelsDir = path.join(__dirname, "models");
-    await FileUtils.ensureDirectory(modelsDir);
+// --- in-memory state ---
+const modelStatus = new Map();
 
-    const modelsFile = path.join(modelsDir, "models.json");
-    if (await FileUtils.fileExists(modelsFile)) {
-      const data = await fs.readFile(modelsFile, "utf8");
-      models = JSON.parse(data);
-    } else {
-      await fs.writeFile(modelsFile, JSON.stringify([], null, 2));
-    }
-  } catch (error) {
-    console.error("Error initializing models:", error);
-  }
-};
+// --- helper: recursive file listing ---
+async function listFiles(dir) {
+  const files = [];
+  await walk(dir, "");
+  return files;
 
-// Save models to file
-const saveModels = async () => {
-  try {
-    const modelsFile = path.join(__dirname, "models", "models.json");
-    await fs.writeFile(modelsFile, JSON.stringify(models, null, 2));
-  } catch (error) {
-    console.error("Error saving models:", error);
-  }
-};
-
-// Routes
-
-// Health check
-app.get("/api/health", (req, res) => {
-  res.json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    version: "1.0.0",
-  });
-});
-
-// Upload images and start 3D model generation
-app.post("/api/upload", upload.array("images", 50), async (req, res) => {
-  try {
-    const { modelName } = req.body;
-
-    if (!req.files || req.files.length === 0) {
-      return res.status(400).json({ error: "No images uploaded" });
-    }
-
-    if (req.files.length < 2) {
-      return res.status(400).json({
-        error: "At least 2 images are required for 3D model generation",
-      });
-    }
-
-    // Create model entry
-    const modelId = uuidv4();
-    const model = {
-      id: modelId,
-      name: modelName || `Model_${Date.now()}`,
-      status: "queued",
-      progress: 0,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      imageCount: req.files.length,
-      images: req.files.map((file) => ({
-        filename: file.filename,
-        originalName: file.originalname,
-        size: file.size,
-        path: file.path,
-      })),
-    };
-
-    models.push(model);
-    await saveModels();
-
-    // Start 3D model generation in background
-    generateModel(modelId, req.files);
-
-    res.json({
-      message: "Images uploaded successfully",
-      modelId,
-      imageCount: req.files.length,
-      model: {
-        id: model.id,
-        name: model.name,
-        status: model.status,
-        progress: model.progress,
-        imageCount: model.imageCount,
-      },
-    });
-  } catch (error) {
-    console.error("Upload error:", error);
-    res.status(500).json({ error: "Upload failed" });
-  }
-});
-
-// Get all models
-app.get("/api/models", (req, res) => {
-  const publicModels = models.map((model) => ({
-    id: model.id,
-    name: model.name,
-    status: model.status,
-    progress: model.progress,
-    createdAt: model.createdAt,
-    updatedAt: model.updatedAt,
-    imageCount: model.imageCount,
-    outputPath: model.outputPath,
-    vertices: model.vertices,
-    faces: model.faces,
-    quality: model.quality,
-    error: model.error,
-  }));
-
-  res.json(publicModels);
-});
-
-// Get specific model
-app.get("/api/models/:id", (req, res) => {
-  const model = models.find((m) => m.id === req.params.id);
-
-  if (!model) {
-    return res.status(404).json({ error: "Model not found" });
-  }
-
-  const publicModel = {
-    id: model.id,
-    name: model.name,
-    status: model.status,
-    progress: model.progress,
-    createdAt: model.createdAt,
-    updatedAt: model.updatedAt,
-    imageCount: model.imageCount,
-    outputPath: model.outputPath,
-    vertices: model.vertices,
-    faces: model.faces,
-    quality: model.quality,
-    error: model.error,
-    images: model.images?.map((img) => ({
-      filename: img.filename,
-      originalName: img.originalName,
-      size: img.size,
-    })),
-  };
-
-  res.json(publicModel);
-});
-
-// Get model status
-app.get("/api/models/:id/status", (req, res) => {
-  const model = models.find((m) => m.id === req.params.id);
-
-  if (!model) {
-    return res.status(404).json({ error: "Model not found" });
-  }
-
-  res.json({
-    id: model.id,
-    status: model.status,
-    progress: model.progress,
-    updatedAt: model.updatedAt,
-    error: model.error,
-  });
-});
-
-// Download model files
-app.get("/api/models/:id/download/:filename", async (req, res) => {
-  try {
-    const { id, filename } = req.params;
-    const model = models.find((m) => m.id === id);
-
-    if (!model) {
-      return res.status(404).json({ error: "Model not found" });
-    }
-
-    if (model.status !== "completed") {
-      return res.status(400).json({ error: "Model not ready for download" });
-    }
-
-    const filePath = path.join(__dirname, "models", id, filename);
-
-    if (!(await FileUtils.fileExists(filePath))) {
-      return res.status(404).json({ error: "File not found" });
-    }
-
-    // Set appropriate headers for download
-    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-    res.setHeader("Content-Type", "application/octet-stream");
-
-    const fileStream = require("fs").createReadStream(filePath);
-    fileStream.pipe(res);
-  } catch (error) {
-    console.error("Download error:", error);
-    res.status(500).json({ error: "Download failed" });
-  }
-});
-
-// List model files
-app.get("/api/models/:id/files", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const model = models.find((m) => m.id === id);
-
-    if (!model) {
-      return res.status(404).json({ error: "Model not found" });
-    }
-
-    if (model.status !== "completed") {
-      return res.json({ files: [] });
-    }
-
-    const modelDir = path.join(__dirname, "models", id);
-
-    if (!(await FileUtils.fileExists(modelDir))) {
-      return res.json({ files: [] });
-    }
-
-    const files = await fs.readdir(modelDir);
-    const fileDetails = await Promise.all(
-      files.map(async (filename) => {
-        const filePath = path.join(modelDir, filename);
-        const stats = await fs.stat(filePath);
-        return {
-          filename,
-          size: stats.size,
-          sizeFormatted: await FileUtils.getFileSize(filePath),
-          extension: FileUtils.getFileExtension(filename),
-          downloadUrl: `/api/models/${id}/download/${filename}`,
-        };
-      })
-    );
-
-    res.json({ files: fileDetails });
-  } catch (error) {
-    console.error("Files listing error:", error);
-    res.status(500).json({ error: "Failed to list files" });
-  }
-});
-
-// Delete model
-app.delete("/api/models/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const modelIndex = models.findIndex((m) => m.id === id);
-
-    if (modelIndex === -1) {
-      return res.status(404).json({ error: "Model not found" });
-    }
-
-    const model = models[modelIndex];
-
-    // Delete model files
-    const modelDir = path.join(__dirname, "models", id);
-    await FileUtils.deleteDirectory(modelDir);
-
-    // Delete uploaded images
-    if (model.images) {
-      for (const image of model.images) {
-        try {
-          await fs.unlink(image.path);
-        } catch (error) {
-          console.log(`Could not delete image: ${image.path}`);
-        }
-      }
-    }
-
-    // Remove from models array
-    models.splice(modelIndex, 1);
-    await saveModels();
-
-    res.json({ message: "Model deleted successfully" });
-  } catch (error) {
-    console.error("Delete error:", error);
-    res.status(500).json({ error: "Failed to delete model" });
-  }
-});
-
-// Function to generate 3D model using Python script
-async function generateModel(modelId, imageFiles) {
-  try {
-    // Update model status
-    const model = models.find((m) => m.id === modelId);
-    if (!model) return;
-
-    model.status = "processing";
-    model.progress = 5;
-    model.updatedAt = Date.now();
-    await saveModels();
-
-    // Prepare image paths
-    const imagePaths = imageFiles.map((file) => file.path);
-
-    // Run Python script
-    const pythonScript = path.join(
-      __dirname,
-      "python",
-      "meshroom_processor.py"
-    );
-    const args = [
-      "--project-id",
-      modelId,
-      "--images",
-      JSON.stringify(imagePaths),
-      "--model-name",
-      model.name,
-    ];
-
-    const pythonProcess = spawn("python3", [pythonScript, ...args]);
-
-    pythonProcess.stdout.on("data", (data) => {
-      console.log(`Python stdout: ${data}`);
-    });
-
-    pythonProcess.stderr.on("data", (data) => {
-      console.error(`Python stderr: ${data}`);
-    });
-
-    pythonProcess.on("close", async (code) => {
-      console.log(`Python process exited with code ${code}`);
-
-      // Reload models from file (updated by Python script)
-      try {
-        const modelsFile = path.join(__dirname, "models", "models.json");
-        const data = await fs.readFile(modelsFile, "utf8");
-        models = JSON.parse(data);
-      } catch (error) {
-        console.error("Error reloading models:", error);
-      }
-    });
-  } catch (error) {
-    console.error("Model generation error:", error);
-
-    // Update model status to failed
-    const model = models.find((m) => m.id === modelId);
-    if (model) {
-      model.status = "failed";
-      model.error = error.message;
-      model.updatedAt = Date.now();
-      await saveModels();
+  async function walk(curr, rel) {
+    for (const item of await fs.readdir(curr, { withFileTypes: true })) {
+      const abs = path.join(curr, item.name);
+      const relPath = path.join(rel, item.name);
+      if (item.isDirectory()) await walk(abs, relPath);
+      else
+        files.push({
+          name: item.name,
+          path: relPath,
+          size: (await fs.stat(abs)).size,
+          downloadUrl: `/api/models/${path.basename(
+            path.dirname(curr)
+          )}/download/${item.name}`,
+          extension: path.extname(item.name).slice(1).toLowerCase(),
+        });
     }
   }
 }
 
-// Cleanup old files periodically
-setInterval(async () => {
+// --- API routes ---
+
+// ✅ Upload route: Handles image processing + OBJ import
+app.post(
+  "/api/upload",
+  upload.fields([
+    { name: "images", maxCount: 100 },
+    { name: "objFiles", maxCount: 10 },
+  ]),
+  async (req, res) => {
+    try {
+      const id = uuidv4();
+      const name = req.body.modelName || `Model_${Date.now()}`;
+      const processor = req.body.processor || "meshroom";
+      const images = (req.files.images || []).map((f) =>
+        path.join(__dirname, "Uploads", f.filename).replace(/\\/g, "/")
+      );
+      const objs = (req.files.objFiles || []).map((f) =>
+        path.join(__dirname, "Uploads", f.filename).replace(/\\/g, "/")
+      );
+
+      if (images.length < 2 && objs.length === 0)
+        return res.status(400).json({ error: "Need ≥2 images or 1 OBJ file" });
+
+      // ✅ Handle OBJ import (skip processing)
+      if (objs.length > 0 && images.length === 0) {
+        const modelDir = path.join(ROOT_MODELS, "import", id);
+        await fs.ensureDir(modelDir);
+        await Promise.all(
+          objs.map((f) => fs.copy(f, path.join(modelDir, path.basename(f))))
+        );
+
+        const status = {
+          id,
+          name,
+          processor: "import",
+          status: "completed",
+          progress: 100,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          images: [],
+          objFiles: objs.map((f) => ({ filename: path.basename(f) })),
+        };
+
+        modelStatus.set(id, status);
+        await fs.writeJson(path.join(modelDir, "status.json"), status);
+        return res.json({ modelId: id });
+      }
+
+      // ✅ Handle image-based processing
+      const modelDir = path.join(ROOT_MODELS, processor, id);
+      await fs.ensureDir(modelDir);
+
+      const status = {
+        id,
+        name,
+        processor,
+        status: "queued",
+        progress: 0,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        images: images.map((f) => ({ filename: path.basename(f) })),
+        objFiles: [],
+      };
+
+      modelStatus.set(id, status);
+      await fs.writeJson(path.join(modelDir, "status.json"), status);
+
+      const script =
+        processor === "open3d"
+          ? "open3d_processor.py"
+          : "meshroom_processor.py";
+
+      const py = spawn(
+        "python",
+        [
+          path.join(__dirname, "python", script),
+          "--project-id",
+          id,
+          "--model-name",
+          name,
+          "--images",
+          JSON.stringify(images),
+          "--output-dir",
+          modelDir,
+        ],
+        { stdio: ["ignore", "pipe", "pipe"] }
+      );
+
+      py.stdout.on("data", (d) => {
+        const line = d.toString().trim();
+        if (line.startsWith("{")) {
+          try {
+            const upd = JSON.parse(line);
+            const s = { ...modelStatus.get(id), ...upd, updatedAt: Date.now() };
+            modelStatus.set(id, s);
+            fs.writeJson(path.join(modelDir, "status.json"), s).catch(() => {});
+          } catch {}
+        }
+      });
+
+      py.stderr.on("data", (d) => console.error("[Py]", d.toString()));
+      py.on("close", (code) => {
+        const s = modelStatus.get(id);
+        if (code !== 0 && s.status !== "failed") {
+          modelStatus.set(id, {
+            ...s,
+            status: "failed",
+            error: "Python crashed",
+          });
+          fs.writeJson(path.join(modelDir, "status.json"), modelStatus.get(id));
+        }
+      });
+
+      res.json({ modelId: id });
+    } catch (e) {
+      console.error("Upload Error:", e);
+      res.status(500).json({ error: e.message });
+    }
+  }
+);
+
+// Get model status
+app.get("/api/models/:modelId/status", (req, res) => {
+  const s = modelStatus.get(req.params.modelId);
+  if (!s) return res.status(404).json({ error: "Model not found" });
+  res.json(s);
+});
+
+// Get full model info
+app.get("/api/models/:modelId", async (req, res) => {
+  const proc = modelStatus.get(req.params.modelId)?.processor;
+  const dir = path.join(ROOT_MODELS, proc || "meshroom", req.params.modelId);
+  const statFile = path.join(dir, "status.json");
+  if (!(await fs.pathExists(statFile)))
+    return res.status(404).json({ error: "Model not found" });
+  res.json(await fs.readJson(statFile));
+});
+
+// List model files
+app.get("/api/models/:modelId/files", async (req, res) => {
+  const proc = modelStatus.get(req.params.modelId)?.processor;
+  const dir = path.join(ROOT_MODELS, proc || "meshroom", req.params.modelId);
+  if (!(await fs.pathExists(dir)))
+    return res.status(404).json({ error: "Model not found" });
+  res.json({ files: await listFiles(dir) });
+});
+
+// Download a single file
+app.get("/api/models/:modelId/download/:filename", async (req, res) => {
+  const proc = modelStatus.get(req.params.modelId)?.processor;
+  const file = path.join(
+    ROOT_MODELS,
+    proc || "meshroom",
+    req.params.modelId,
+    req.params.filename
+  );
+  if (!(await fs.pathExists(file)))
+    return res.status(404).json({ error: "File not found" });
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename=${req.params.filename}`
+  );
+  res.sendFile(file);
+});
+
+// Download full model as zip
+app.get("/api/models/:modelId/download-all", async (req, res) => {
+  const proc = modelStatus.get(req.params.modelId)?.processor;
+  const dir = path.join(ROOT_MODELS, proc || "meshroom", req.params.modelId);
+  if (!(await fs.pathExists(dir)))
+    return res.status(404).json({ error: "Model not found" });
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename=${req.params.modelId}.zip`
+  );
+  const archive = archiver("zip");
+  archive.pipe(res);
+  archive.directory(dir, false);
+  archive.finalize();
+});
+
+// Get all models
+app.get("/api/models", async (req, res) => {
   try {
-    const uploadsDir = path.join(__dirname, "uploads");
-    const tempDir = path.join(__dirname, "temp");
-
-    await FileUtils.cleanupOldFiles(uploadsDir, 7); // Keep for 7 days
-    await FileUtils.cleanupOldFiles(tempDir, 1); // Keep for 1 day
-
-    console.log("Cleanup completed");
-  } catch (error) {
-    console.error("Cleanup error:", error);
-  }
-}, 24 * 60 * 60 * 1000); // Run every 24 hours
-
-// Error handling middleware
-app.use((error, req, res, next) => {
-  console.error("Error:", error);
-
-  if (error instanceof multer.MulterError) {
-    if (error.code === "LIMIT_FILE_SIZE") {
-      return res.status(400).json({ error: "File too large" });
+    const result = [];
+    const processors = ["meshroom", "open3d", "import"];
+    for (const proc of processors) {
+      const baseDir = path.join(ROOT_MODELS, proc);
+      const modelIds = await fs.readdir(baseDir);
+      for (const id of modelIds) {
+        const statusPath = path.join(baseDir, id, "status.json");
+        if (await fs.pathExists(statusPath)) {
+          const json = await fs.readJson(statusPath);
+          result.push(json);
+        }
+      }
     }
-    if (error.code === "LIMIT_FILE_COUNT") {
-      return res.status(400).json({ error: "Too many files" });
-    }
+    result.sort((a, b) => b.createdAt - a.createdAt);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch models" });
   }
-
-  res.status(500).json({ error: "Internal server error" });
 });
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ error: "Not found" });
+// Delete model
+app.delete("/api/models/:modelId", async (req, res) => {
+  try {
+    const id = req.params.modelId;
+    const match = await Promise.any(
+      ["meshroom", "open3d", "import"].map(async (processor) => {
+        const modelPath = path.join(ROOT_MODELS, processor, id);
+        if (await fs.pathExists(modelPath)) return modelPath;
+        throw new Error("Not found");
+      })
+    ).catch(() => null);
+
+    if (!match) return res.status(404).json({ error: "Model not found" });
+
+    await fs.remove(match);
+    modelStatus.delete(id);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Delete error:", err);
+    res.status(500).json({ error: "Failed to delete model" });
+  }
 });
+
+// Health check
+app.get("/api/health", (_, res) => res.json({ status: "ok" }));
+
+// Serve uploads
+app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
 
 // Start server
-const startServer = async () => {
-  try {
-    await initializeModels();
-
-    app.listen(PORT, () => {
-      console.log(`🚀 Snap3D Backend Server running on port ${PORT}`);
-      console.log(`📁 Models directory: ${path.join(__dirname, "models")}`);
-      console.log(`📁 Uploads directory: ${path.join(__dirname, "uploads")}`);
-      console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
-    });
-  } catch (error) {
-    console.error("Failed to start server:", error);
-    process.exit(1);
-  }
-};
-
-startServer();
-
-// Graceful shutdown
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, shutting down gracefully");
-  process.exit(0);
-});
-
-process.on("SIGINT", () => {
-  console.log("SIGINT received, shutting down gracefully");
-  process.exit(0);
-});
+app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));

@@ -1,9 +1,8 @@
 import React, { useState } from 'react';
 import {Link} from 'react-router-dom';
 import { Camera, Upload, Download, Zap, Star, Play, ArrowRight, Check, Menu, X, Sparkles, MousePointer2, Users, Building2, Clock, Shield } from 'lucide-react';
-import Navbar from './Navbar';
 
-export default function Snap3DProfessional() {
+export default function LandingPage() {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   const features = [
@@ -82,7 +81,6 @@ export default function Snap3DProfessional() {
 
   return (
     <div className="min-h-screen bg-white">
-      <Navbar/>
       {/* Hero Section */}
       <section className="bg-gradient-to-b from-gray-50 to-white py-20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">

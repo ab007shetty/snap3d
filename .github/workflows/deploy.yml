@@ -3,8 +3,8 @@ name: Deploy React App to GitHub Pages
 on:
   push:
     branches:
-      - master # 🔁 Auto trigger on push to main
-  workflow_dispatch: # 👇 Manual trigger button in GitHub UI
+      - master
+  workflow_dispatch:
 
 jobs:
   build-and-deploy:
@@ -22,11 +22,15 @@ jobs:
         with:
           node-version: 18
 
-      - name: Install Dependencies
-        run: npm install
+      - name: Clean install (fix Rollup native error)
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install
 
-      - name: Build Project
+      - name: Build Project (disable native Rollup)
         run: npm run build
+        env:
+          ROLLUP_NO_NATIVE: true
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3

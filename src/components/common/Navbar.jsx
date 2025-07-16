@@ -21,13 +21,6 @@ export default function Navbar() {
               </Link>
             </div>
             
-            <nav className="hidden md:flex space-x-8">
-              <a href="#features" className="text-gray-700 hover:text-blue-600 transition-colors font-medium">Features</a>
-              <a href="#how-it-works" className="text-gray-700 hover:text-blue-600 transition-colors font-medium">How It Works</a>
-              <a href="#testimonials" className="text-gray-700 hover:text-blue-600 transition-colors font-medium">Testimonials</a>
-              <a href="#pricing" className="text-gray-700 hover:text-blue-600 transition-colors font-medium">Pricing</a>
-            </nav>
-            
             <div className="hidden md:flex items-center space-x-4">
               <button className="text-gray-700 hover:text-blue-600 transition-colors font-medium">Sign In</button>
               <button className="bg-blue-600 text-white px-6 py-2 rounded-lg hover:bg-blue-700 transition-all font-medium shadow-sm">
@@ -48,11 +41,6 @@ export default function Navbar() {
         {isMenuOpen && (
           <div className="md:hidden bg-white border-t border-gray-200 shadow-lg">
             <div className="px-4 py-2 space-y-2">
-              <a href="#features" className="block py-3 text-gray-700 hover:text-blue-600 font-medium">Features</a>
-              <a href="#how-it-works" className="block py-3 text-gray-700 hover:text-blue-600 font-medium">How It Works</a>
-              <a href="#testimonials" className="block py-3 text-gray-700 hover:text-blue-600 font-medium">Testimonials</a>
-              <a href="#pricing" className="block py-3 text-gray-700 hover:text-blue-600 font-medium">Pricing</a>
-              <hr className="border-gray-200" />
               <button className="block w-full text-left py-3 text-gray-700 font-medium">Sign In</button>
               <button className="block w-full bg-blue-600 text-white py-3 rounded-lg mt-2 font-medium">Get Started</button>
             </div>

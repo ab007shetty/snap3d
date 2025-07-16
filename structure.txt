@@ -1,0 +1,55 @@
+|-- eslint.config.js
+|-- index.html
+|-- LICENSE
+|-- package-lock.json
+|-- package.json
+|-- postcss.config.js
+|-- print_structure.js
+|-- public
+|   +-- favicon.ico
+|-- README.md
+|-- snap3d-backend
+|   |-- models
+|   |   |-- import
+|   |   |   |-- 6912656c-268b-4ebb-852e-265b309d3d83
+|   |   |   |   |-- 1752611819812-e0657ae0-36ca-41f2-881f-ff2393635ff6.obj
+|   |   |   |   +-- status.json
+|   |   |   +-- a6e87a10-c20c-43a3-8965-9b8420559cb7
+|   |   |       |-- 1752612046992-c24bd6b0-0080-47cf-b160-45729cd6e6df.obj
+|   |   |       +-- status.json
+|   |   |-- meshroom
+|   |   +-- open3d
+|   |-- package-lock.json
+|   |-- package.json
+|   |-- python
+|   |   |-- meshroom_processor.py
+|   |   |-- open3d_processor.py
+|   |   +-- requirements.txt
+|   |-- server.js
+|   |-- temp
+|   |-- uploads
+|   +-- utils
+|       +-- fileUtils.js
+|-- src
+|   |-- App.jsx
+|   |-- assets
+|   |   |-- react.svg
+|   |   +-- vite.svg
+|   |-- components
+|   |   |-- common
+|   |   |   |-- Alert.jsx
+|   |   |   |-- Footer.jsx
+|   |   |   +-- Navbar.jsx
+|   |   |-- GenerateModel.jsx
+|   |   |-- ModelLibrary.jsx
+|   |   |-- ModelPreview.jsx
+|   |   |-- ModelResult.jsx
+|   |   +-- ModelUpload.jsx
+|   |-- index.css
+|   |-- main.jsx
+|   +-- pages
+|       |-- LandingPage.jsx
+|       +-- Snap3d.jsx
+|-- structure.txt
+|-- tailwind.config.js
++-- vite.config.js
