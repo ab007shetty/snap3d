@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+temp
+uploads
+
+import
+meshroom
+open3d

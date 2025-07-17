@@ -1,481 +1,716 @@
-import React, { useRef, useEffect, useState } from 'react';
-import { X, Maximize2, Minimize2, Download, RotateCcw, ZoomIn, ZoomOut, Move } from 'lucide-react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { X, Maximize2, Minimize2, Move, ZoomOut, ZoomIn, Minus, RefreshCw } from 'lucide-react';
 import * as THREE from 'three';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader';
+import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader';
 
-export default function EnhancedModelPreviewModal({ model, onClose }) {
+export default function ModelPreview({ model, onClose }) {
   const mountRef = useRef(null);
+  const fullscreenRef = useRef(null);
   const sceneRef = useRef(null);
   const rendererRef = useRef(null);
   const cameraRef = useRef(null);
-  const controlsRef = useRef(null);
   const modelObjectRef = useRef(null);
   const animationIdRef = useRef(null);
-  const fullscreenRef = useRef(null);
-  
+  const lightsRef = useRef([]);
+  const controlsRef = useRef({
+    isDragging: false,
+    isPanning: false,
+    lastX: 0,
+    lastY: 0,
+    rotation: { x: 0, y: 0 },
+    pan: { x: 0, y: 0 },
+    zoom: 1,
+    initialTouchDistance: 0,
+    isPinching: false,
+    autoRotateSpeed: 0.005,
+    dampingFactor: 0.1,
+    autoRotate: true // Auto-rotate enabled by default
+  });
+  const initialCameraDistance = useRef(5);
+  const modelBounds = useRef({ center: new THREE.Vector3(), size: new THREE.Vector3() });
+
+  // UI States
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [autoRotate, setAutoRotate] = useState(true);
   const [wireframe, setWireframe] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [showBoundingBox, setShowBoundingBox] = useState(false);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [modelInfo, setModelInfo] = useState({ vertices: 0, faces: 0, materials: 0 });
+  const [fps, setFps] = useState(0);
+  const fpsRef = useRef({ frames: 0, lastTime: performance.now() });
+  const [retryCount, setRetryCount] = useState(0);
+  const maxRetries = 3;
+  const [baseFolder, setBaseFolder] = useState(`http://localhost:3001/models/import/${model?.id || ''}/`);
 
-  // Get model file URL - consistent with backend structure
-  const getModelFileUrl = (model) => {
-    if (!model || !model.id || !model.processor) return null;
-    
-    const processor = model.processor;
-    let fileName = null;
-    
-    if (model.objFiles && model.objFiles.length > 0) {
-      fileName = model.objFiles[0].filename;
-    } else if (processor === "open3d" || processor === "meshroom") {
-      fileName = "texturedMesh.obj";
-    } else {
-      fileName = model.fileName || `${model.name}.obj`;
-    }
-    
-    return `http://localhost:3001/models/${processor}/${model.id}/${fileName}`;
-  };
-
+  // Handle keyboard shortcuts
   useEffect(() => {
-    if (!mountRef.current) return;
+    const handleKeyDown = (e) => {
+      if (e.target.matches('input, textarea, button')) return;
+      if (e.key === 'Escape') {
+        isFullscreen ? exitFullscreen() : onClose();
+      } else if (e.key === 'r') {
+        e.preventDefault();
+        resetView();
+      } else if (e.key === 'f') {
+        e.preventDefault();
+        toggleFullscreen();
+      } else if (e.key === 'w') {
+        e.preventDefault();
+        toggleWireframe();
+      } else if (e.key === 'b') {
+        e.preventDefault();
+        setShowBoundingBox(prev => !prev);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [isFullscreen, onClose]);
 
-    // Scene setup
+  // Handle fullscreen changes
+  useEffect(() => {
+    const handleFullscreenChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  // Update wireframe
+  useEffect(() => {
+    if (modelObjectRef.current) {
+      modelObjectRef.current.traverse(child => {
+        if (child.isMesh && child.material) {
+          const materials = Array.isArray(child.material) ? child.material : [child.material];
+          materials.forEach(mat => {
+            if (mat.userData.originalWireframe === undefined) {
+              mat.userData.originalWireframe = mat.wireframe;
+            }
+            mat.wireframe = wireframe;
+            mat.needsUpdate = true;
+          });
+        }
+      });
+    }
+  }, [wireframe]);
+
+  // Update bounding box
+  useEffect(() => {
+    if (sceneRef.current) {
+      sceneRef.current.children.forEach(child => {
+        if (child instanceof THREE.BoxHelper) {
+          child.visible = showBoundingBox;
+        }
+      });
+    }
+  }, [showBoundingBox]);
+
+  // Lighting setup
+  const setupLighting = useCallback((scene) => {
+    lightsRef.current.forEach(light => scene.remove(light));
+    lightsRef.current = [];
+
+    const dirLight1 = new THREE.DirectionalLight(0xffffff, 1.0);
+    dirLight1.position.set(10, 10, 10);
+    dirLight1.castShadow = true;
+    dirLight1.shadow.mapSize.set(1024, 1024);
+
+    const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.5);
+    dirLight2.position.set(-10, -10, -10);
+
+    const pointLight = new THREE.PointLight(0xffffff, 0.8, 100);
+    pointLight.position.set(0, 0, 10);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+
+    const lights = [dirLight1, dirLight2, pointLight, ambientLight];
+    lights.forEach(light => {
+      scene.add(light);
+      lightsRef.current.push(light);
+    });
+  }, []);
+
+  // FPS monitoring
+  useEffect(() => {
+    const updateFps = () => {
+      fpsRef.current.frames++;
+      const now = performance.now();
+      if (now - fpsRef.current.lastTime >= 1000) {
+        setFps(fpsRef.current.frames);
+        fpsRef.current.frames = 0;
+        fpsRef.current.lastTime = now;
+      }
+    };
+    const interval = setInterval(updateFps, 16);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Main 3D setup
+  useEffect(() => {
+    if (!mountRef.current || !model) return;
+
+    console.log('ModelPreview - Model data:', model);
+
+    // Initialize scene
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf0f0f0);
+    scene.background = new THREE.Color(0xf8f9fa); // Reverted to white background
+    scene.fog = new THREE.Fog(0xf8f9fa, 50, 200);
     sceneRef.current = scene;
 
-    // Camera setup
-    const camera = new THREE.PerspectiveCamera(
-      75,
-      mountRef.current.clientWidth / mountRef.current.clientHeight,
-      0.1,
-      1000
-    );
+    // Initialize camera
+    const width = isFullscreen ? window.innerWidth : mountRef.current.clientWidth;
+    const height = isFullscreen ? window.innerHeight : mountRef.current.clientHeight;
+    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
     cameraRef.current = camera;
 
-    // Renderer setup
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
+    // Initialize renderer
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: true,
+      powerPreference: 'high-performance',
+      precision: 'mediump'
+    });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
     rendererRef.current = renderer;
     mountRef.current.appendChild(renderer.domElement);
 
-    // Lighting
-    const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
-    scene.add(ambientLight);
+    // Log WebGL capabilities
+    console.log('WebGL Capabilities:', {
+      version: renderer.getContext().getParameter(renderer.getContext().VERSION),
+      maxTextureSize: renderer.getContext().getParameter(renderer.getContext().MAX_TEXTURE_SIZE),
+      renderer: renderer.info.render
+    });
 
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight.position.set(10, 10, 5);
-    directionalLight.castShadow = true;
-    scene.add(directionalLight);
+    // Setup lighting
+    setupLighting(scene);
 
-    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
-    directionalLight2.position.set(-10, -10, -5);
-    scene.add(directionalLight2);
+    // Load model
+    const loadModel = async () => {
+      try {
+        setIsLoading(true);
+        setError(null);
+        setLoadingProgress(0);
 
-    // Controls (basic mouse controls)
-    const controls = {
-      isMouseDown: false,
-      previousMousePosition: { x: 0, y: 0 },
-      rotation: { x: 0, y: 0 },
-      zoom: 1,
-      pan: { x: 0, y: 0 }
+        // Reset controls for centering
+        controlsRef.current.rotation = { x: 0, y: 0 };
+        controlsRef.current.pan = { x: 0, y: 0 };
+        controlsRef.current.zoom = 1;
+        controlsRef.current.autoRotate = true; // Enable auto-rotate on load
+
+        if (!baseFolder || !model.objFilename || !model.mtlFilename) {
+          throw new Error('Missing model file URLs or filenames');
+        }
+        console.log('Base folder:', baseFolder);
+
+        // Simulate loading progress
+        const progressInterval = setInterval(() => {
+          setLoadingProgress(prev => Math.min(prev + 10, 90));
+        }, 100);
+
+        // Load MTL
+        const mtlLoader = new MTLLoader();
+        mtlLoader.setPath(baseFolder);
+        mtlLoader.setResourcePath(baseFolder);
+        const mtlUrl = `${baseFolder}${model.mtlFilename}`;
+        console.log('Attempting to load MTL:', mtlUrl);
+
+        let materials;
+        try {
+          materials = await mtlLoader.loadAsync(model.mtlFilename, xhr => {
+            console.log(`MTL loading: ${(xhr.loaded / xhr.total * 100).toFixed(2)}%`);
+            setLoadingProgress((xhr.loaded / xhr.total) * 50);
+          });
+
+          const textureLoader = new THREE.TextureLoader();
+          for (const mat of Object.values(materials.materials)) {
+            if (mat.map?.sourceFile) {
+              const textureUrl = `${baseFolder}${mat.map.sourceFile}`;
+              console.log('Loading texture:', textureUrl);
+              try {
+                const texture = await textureLoader.loadAsync(textureUrl);
+                texture.flipY = false;
+                texture.encoding = THREE.sRGBEncoding;
+                mat.map = texture;
+                mat.needsUpdate = true;
+              } catch (texError) {
+                console.warn('Texture load failed:', textureUrl, texError);
+                mat.map = null;
+                mat.needsUpdate = true;
+              }
+            }
+            mat.roughness = mat.roughness ?? 0.8;
+            mat.metalness = mat.metalness ?? 0.2;
+            mat.side = THREE.DoubleSide;
+            mat.needsUpdate = true;
+          }
+          materials.preload();
+          console.log('MTL materials loaded:', materials);
+        } catch (mtlError) {
+          console.warn('MTL loading failed, using fallback material:', mtlError);
+          materials = null;
+        }
+
+        // Load OBJ
+        const objLoader = new OBJLoader();
+        if (materials) objLoader.setMaterials(materials);
+        objLoader.setPath(baseFolder);
+        const objUrl = `${baseFolder}${model.objFilename}`;
+        console.log('Attempting to load OBJ:', objUrl);
+
+        const object = await objLoader.loadAsync(model.objFilename, xhr => {
+          console.log(`OBJ loading: ${(xhr.loaded / xhr.total * 100).toFixed(2)}%`);
+          setLoadingProgress(50 + (xhr.loaded / xhr.total) * 50);
+        });
+
+        clearInterval(progressInterval);
+        setLoadingProgress(100);
+
+        // Validate geometry
+        let vertexCount = 0;
+        let faceCount = 0;
+        let materialCount = 0;
+        let hasValidGeometry = false;
+
+        object.traverse(child => {
+          if (child.isMesh && child.geometry?.attributes.position) {
+            vertexCount += child.geometry.attributes.position.count;
+            faceCount += child.geometry.index ? child.geometry.index.count / 3 : child.geometry.attributes.position.count / 3;
+            hasValidGeometry = true;
+            const materials = Array.isArray(child.material) ? child.material : [child.material];
+            materialCount += materials.length;
+            materials.forEach(mat => {
+              mat.wireframe = wireframe;
+              mat.side = THREE.DoubleSide;
+              mat.needsUpdate = true;
+            });
+            child.castShadow = true;
+            child.receiveShadow = true;
+          }
+        });
+
+        if (!hasValidGeometry) throw new Error('No valid geometry found in model');
+
+        setModelInfo({ vertices: vertexCount, faces: faceCount, materials: materialCount });
+
+        // Center and scale with offset to top-right
+        const box = new THREE.Box3().setFromObject(object);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        modelBounds.current.center = center;
+        modelBounds.current.size = size;
+
+        object.position.sub(center); // Center the model
+        const maxDim = Math.max(size.x, size.y, size.z, 0.0001);
+        const targetSize = 6; // Increased from 4 to make model larger by default
+        const scale = Math.min(targetSize / maxDim, 10);
+        object.scale.setScalar(scale);
+        object.position.set(2, 2, 0); // Offset to top-right (x: 2, y: 2)
+
+        console.log('Model bounds:', { center, size, scale, maxDim });
+
+        // Set camera to focus on top-right
+        initialCameraDistance.current = Math.max(maxDim * 1.5, 5); // Reduced distance for larger view
+        camera.position.set(3, maxDim + 2, initialCameraDistance.current); // Move camera up and right
+        camera.lookAt(2, 2, 0); // Look at the offset position
+        camera.far = maxDim * 100;
+        camera.updateProjectionMatrix();
+
+        // Add bounding box helper
+        const boxHelper = new THREE.BoxHelper(object, 0xff0000);
+        boxHelper.visible = showBoundingBox;
+        scene.add(boxHelper);
+
+        modelObjectRef.current = object;
+        scene.add(object);
+        setIsLoading(false);
+        setRetryCount(0);
+      } catch (err) {
+        console.error('Model loading error:', err);
+        setError(err.message || `Failed to load model from ${baseFolder}${model.objFilename}`);
+        setIsLoading(false);
+        if (retryCount < maxRetries) {
+          setTimeout(() => {
+            setRetryCount(prev => prev + 1);
+            setReloadKey(prev => prev + 1);
+          }, 2000);
+        }
+      }
     };
-    controlsRef.current = controls;
 
-    // Mouse event handlers
-    const handleMouseDown = (event) => {
-      controls.isMouseDown = true;
-      controls.previousMousePosition = {
-        x: event.clientX,
-        y: event.clientY
-      };
+    loadModel();
+
+    // Event handlers
+    const canvas = renderer.domElement;
+    canvas.style.cursor = 'grab';
+    canvas.style.touchAction = 'none';
+
+    let velocity = { x: 0, y: 0 };
+    let lastMoveTime = performance.now();
+
+    const handleMouseDown = (e) => {
+      e.preventDefault();
+      controlsRef.current.isDragging = true;
+      controlsRef.current.isPanning = e.shiftKey || e.button === 1;
+      controlsRef.current.lastX = e.clientX;
+      controlsRef.current.lastY = e.clientY;
+      controlsRef.current.autoRotate = false; // Stop auto-rotate on click
+      canvas.style.cursor = controlsRef.current.isPanning ? 'move' : 'grabbing';
+      velocity = { x: 0, y: 0 };
+    };
+
+    const handleMouseMove = (e) => {
+      if (!controlsRef.current.isDragging || !modelObjectRef.current) return;
+
+      const deltaX = e.clientX - controlsRef.current.lastX;
+      const deltaY = e.clientY - controlsRef.current.lastY;
+      const currentTime = performance.now();
+      const deltaTime = currentTime - lastMoveTime;
+
+      if (deltaTime > 0) {
+        velocity.x = deltaX / deltaTime;
+        velocity.y = deltaY / deltaTime;
+      }
+
+      const rotateSpeed = 0.008;
+      const panSpeed = 0.005;
+
+      if (controlsRef.current.isPanning) {
+        controlsRef.current.pan.x += deltaX * panSpeed * (initialCameraDistance.current / 5);
+        controlsRef.current.pan.y -= deltaY * panSpeed * (initialCameraDistance.current / 5);
+      } else {
+        controlsRef.current.rotation.y += deltaX * rotateSpeed;
+        controlsRef.current.rotation.x += deltaY * rotateSpeed;
+        controlsRef.current.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, controlsRef.current.rotation.x));
+      }
+
+      controlsRef.current.lastX = e.clientX;
+      controlsRef.current.lastY = e.clientY;
+      lastMoveTime = currentTime;
     };
 
     const handleMouseUp = () => {
-      controls.isMouseDown = false;
+      controlsRef.current.isDragging = false;
+      controlsRef.current.isPanning = false;
+      canvas.style.cursor = 'grab';
     };
 
-    const handleMouseMove = (event) => {
-      if (!controls.isMouseDown) return;
+    const handleWheel = (e) => {
+      e.preventDefault();
+      const zoomSpeed = 0.1;
+      const delta = e.deltaY > 0 ? -zoomSpeed : zoomSpeed;
+      controlsRef.current.zoom = Math.max(0.1, Math.min(10, controlsRef.current.zoom + delta));
+    };
 
-      const deltaMove = {
-        x: event.clientX - controls.previousMousePosition.x,
-        y: event.clientY - controls.previousMousePosition.y
-      };
-
-      if (event.shiftKey) {
-        // Pan
-        controls.pan.x += deltaMove.x * 0.01;
-        controls.pan.y -= deltaMove.y * 0.01;
-      } else {
-        // Rotate
-        controls.rotation.y += deltaMove.x * 0.01;
-        controls.rotation.x += deltaMove.y * 0.01;
+    const handleTouchStart = (e) => {
+      e.preventDefault();
+      controlsRef.current.autoRotate = false; // Stop auto-rotate on touch
+      if (e.touches.length === 1) {
+        controlsRef.current.isDragging = true;
+        controlsRef.current.lastX = e.touches[0].clientX;
+        controlsRef.current.lastY = e.touches[0].clientY;
+        controlsRef.current.isPinching = false;
+      } else if (e.touches.length === 2) {
+        controlsRef.current.isPinching = true;
+        controlsRef.current.isDragging = false;
+        controlsRef.current.initialTouchDistance = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
       }
-
-      controls.previousMousePosition = {
-        x: event.clientX,
-        y: event.clientY
-      };
     };
 
-    const handleWheel = (event) => {
-      event.preventDefault();
-      controls.zoom += event.deltaY * -0.001;
-      controls.zoom = Math.max(0.1, Math.min(5, controls.zoom));
+    const handleTouchMove = (e) => {
+      e.preventDefault();
+      if (controlsRef.current.isDragging && e.touches.length === 1) {
+        const deltaX = e.touches[0].clientX - controlsRef.current.lastX;
+        const deltaY = e.touches[0].clientY - controlsRef.current.lastY;
+        const rotateSpeed = 0.008;
+        controlsRef.current.rotation.y += deltaX * rotateSpeed;
+        controlsRef.current.rotation.x += deltaY * rotateSpeed;
+        controlsRef.current.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, controlsRef.current.rotation.x));
+        controlsRef.current.lastX = e.touches[0].clientX;
+        controlsRef.current.lastY = e.touches[0].clientY;
+      } else if (controlsRef.current.isPinching && e.touches.length === 2) {
+        const distance = Math.hypot(
+          e.touches[0].clientX - e.touches[1].clientX,
+          e.touches[0].clientY - e.touches[1].clientY
+        );
+        const delta = (distance - controlsRef.current.initialTouchDistance) * 0.003;
+        controlsRef.current.zoom = Math.max(0.1, Math.min(10, controlsRef.current.zoom + delta));
+        controlsRef.current.initialTouchDistance = distance;
+      }
     };
 
-    renderer.domElement.addEventListener('mousedown', handleMouseDown);
-    renderer.domElement.addEventListener('mouseup', handleMouseUp);
-    renderer.domElement.addEventListener('mousemove', handleMouseMove);
-    renderer.domElement.addEventListener('wheel', handleWheel);
+    const handleTouchEnd = (e) => {
+      e.preventDefault();
+      if (e.touches.length === 0) {
+        controlsRef.current.isDragging = false;
+        controlsRef.current.isPinching = false;
+      } else if (e.touches.length === 1) {
+        controlsRef.current.isPinching = false;
+        controlsRef.current.isDragging = true;
+        controlsRef.current.lastX = e.touches[0].clientX;
+        controlsRef.current.lastY = e.touches[0].clientY;
+      }
+    };
 
-    // Load model
-    loadModel();
+    const handleContextMenu = (e) => e.preventDefault();
 
-    // Animation loop
+    canvas.addEventListener('mousedown', handleMouseDown);
+    canvas.addEventListener('mousemove', handleMouseMove);
+    canvas.addEventListener('mouseup', handleMouseUp);
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+    canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+    canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+    canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+    canvas.addEventListener('contextmenu', handleContextMenu);
+
+    // Animation loop with damping
     const animate = () => {
       animationIdRef.current = requestAnimationFrame(animate);
-      
       if (modelObjectRef.current) {
-        // Apply controls
-        if (autoRotate && !controls.isMouseDown) {
-          modelObjectRef.current.rotation.y += 0.005;
+        if (controlsRef.current.autoRotate && !controlsRef.current.isDragging && !controlsRef.current.isPinching) {
+          controlsRef.current.rotation.y += controlsRef.current.autoRotateSpeed;
+          controlsRef.current.rotation.x *= 0.98;
+          modelObjectRef.current.rotation.set(0, controlsRef.current.rotation.y, 0);
+        } else {
+          modelObjectRef.current.rotation.x = controlsRef.current.rotation.x;
+          modelObjectRef.current.rotation.y = controlsRef.current.rotation.y;
         }
-        
-        modelObjectRef.current.rotation.x = controls.rotation.x;
-        modelObjectRef.current.rotation.y += controls.rotation.y * 0.1;
-        
-        // Apply zoom
-        camera.position.z = 5 / controls.zoom;
-        
-        // Apply pan
-        camera.position.x = controls.pan.x;
-        camera.position.y = controls.pan.y;
+
+        const targetPosition = new THREE.Vector3(
+          controlsRef.current.pan.x,
+          controlsRef.current.pan.y,
+          initialCameraDistance.current / controlsRef.current.zoom
+        );
+        camera.position.lerp(targetPosition, controlsRef.current.dampingFactor);
+        camera.lookAt(2, 2, 0); // Maintain look-at on top-right offset
+        renderer.render(scene, camera);
       }
-      
-      renderer.render(scene, camera);
     };
     animate();
 
-    // Handle resize
+    // Resize handler
     const handleResize = () => {
-      if (!mountRef.current) return;
-      
-      const width = mountRef.current.clientWidth;
-      const height = mountRef.current.clientHeight;
-      
+      if (!mountRef.current || !rendererRef.current || !cameraRef.current) return;
+      const width = isFullscreen ? window.innerWidth : mountRef.current.clientWidth;
+      const height = isFullscreen ? window.innerHeight : mountRef.current.clientHeight;
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     };
-
     window.addEventListener('resize', handleResize);
 
     // Cleanup
     return () => {
       window.removeEventListener('resize', handleResize);
-      renderer.domElement.removeEventListener('mousedown', handleMouseDown);
-      renderer.domElement.removeEventListener('mouseup', handleMouseUp);
-      renderer.domElement.removeEventListener('mousemove', handleMouseMove);
-      renderer.domElement.removeEventListener('wheel', handleWheel);
-      
-      if (animationIdRef.current) {
-        cancelAnimationFrame(animationIdRef.current);
-      }
-      
-      if (mountRef.current && renderer.domElement) {
-        mountRef.current.removeChild(renderer.domElement);
-      }
-      
+      canvas.removeEventListener('mousedown', handleMouseDown);
+      canvas.removeEventListener('mousemove', handleMouseMove);
+      canvas.removeEventListener('mouseup', handleMouseUp);
+      canvas.removeEventListener('wheel', handleWheel);
+      canvas.removeEventListener('touchstart', handleTouchStart);
+      canvas.removeEventListener('touchmove', handleTouchMove);
+      canvas.removeEventListener('touchend', handleTouchEnd);
+      canvas.removeEventListener('contextmenu', handleContextMenu);
+
+      if (animationIdRef.current) cancelAnimationFrame(animationIdRef.current);
+      if (mountRef.current && renderer.domElement) mountRef.current.removeChild(renderer.domElement);
+
+      scene.traverse(child => {
+        if (child.geometry) child.geometry.dispose();
+        if (child.material) {
+          if (Array.isArray(child.material)) child.material.forEach(mat => mat.dispose());
+          else child.material.dispose();
+        }
+      });
       renderer.dispose();
     };
-  }, [model, autoRotate]);
+  }, [model, isFullscreen, reloadKey, showBoundingBox, setupLighting]);
 
-  const loadModel = async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
+  // Control functions
+  const enterFullscreen = () => fullscreenRef.current?.requestFullscreen?.();
+  const exitFullscreen = () => document.exitFullscreen?.();
+  const toggleFullscreen = useCallback(() => (isFullscreen ? exitFullscreen() : enterFullscreen()), [isFullscreen]);
 
-      // Use the model's fileUrl if available, otherwise generate it
-      const modelUrl = model.fileUrl || getModelFileUrl(model);
-      console.log('Loading model from URL:', modelUrl); // Debug log
+  const resetView = useCallback(() => {
+    controlsRef.current.rotation = { x: 0, y: 0 };
+    controlsRef.current.pan = { x: 0, y: 0 };
+    controlsRef.current.zoom = 1;
+  }, []);
 
-      if (!modelUrl) {
-        throw new Error('No model URL available');
-      }
+  const toggleWireframe = useCallback(() => setWireframe(prev => !prev), []);
 
-      // Fetch the model file
-      let objText;
-      if (modelUrl.startsWith('blob:')) {
-        // Handle blob URL
-        const response = await fetch(modelUrl);
-        if (!response.ok) {
-          throw new Error(`Failed to fetch blob: ${response.status} ${response.statusText}`);
-        }
-        objText = await response.text();
-      } else {
-        // Handle regular URL
-        const response = await fetch(modelUrl);
-        if (!response.ok) {
-          throw new Error(`Failed to load model: ${response.status} ${response.statusText}`);
-        }
-        objText = await response.text();
-      }
-      
-      console.log('OBJ file loaded, length:', objText.length); // Debug log
-      
-      // Parse OBJ file
-      const geometry = parseOBJ(objText);
-      
-      if (!geometry || geometry.attributes.position.count === 0) {
-        throw new Error('Invalid model data - no vertices found');
-      }
-      
-      console.log('Geometry created, vertices:', geometry.attributes.position.count); // Debug log
-      
-      // Create material with better appearance
-      const material = new THREE.MeshLambertMaterial({
-        color: 0x606060,
-        side: THREE.DoubleSide,
-        wireframe: wireframe
-      });
-      
-      // Create mesh
-      const mesh = new THREE.Mesh(geometry, material);
-      
-      // Center and scale the model
-      geometry.computeBoundingBox();
-      const box = geometry.boundingBox;
-      const center = box.getCenter(new THREE.Vector3());
-      const size = box.getSize(new THREE.Vector3());
-      
-      // Center the geometry
-      geometry.translate(-center.x, -center.y, -center.z);
-      
-      // Scale to fit in view
-      const maxDim = Math.max(size.x, size.y, size.z);
-      if (maxDim > 0) {
-        const scale = 3 / maxDim;
-        mesh.scale.setScalar(scale);
-      }
-      
-      // Add to scene
-      if (modelObjectRef.current) {
-        sceneRef.current.remove(modelObjectRef.current);
-      }
-      
-      modelObjectRef.current = mesh;
-      sceneRef.current.add(mesh);
-      
-      // Position camera to view the model
-      cameraRef.current.position.set(0, 0, 5);
-      cameraRef.current.lookAt(0, 0, 0);
-      
-      console.log('Model loaded successfully'); // Debug log
-      setIsLoading(false);
-    } catch (err) {
-      console.error('Model loading error:', err);
-      setError(err.message || 'Failed to load model');
-      setIsLoading(false);
-    }
-  };
+  const zoomIn = useCallback(() => {
+    controlsRef.current.zoom = Math.min(10, controlsRef.current.zoom + 0.3);
+  }, []);
 
-  // Enhanced OBJ parser (same as ModelResult)
-  const parseOBJ = (objText) => {
-    const vertices = [];
-    const faces = [];
-    
-    const lines = objText.split('\n');
-    
-    for (let line of lines) {
-      line = line.trim();
-      if (!line || line.startsWith('#')) continue;
-      
-      if (line.startsWith('v ')) {
-        // Parse vertex
-        const parts = line.split(/\s+/);
-        if (parts.length >= 4) {
-          vertices.push(
-            parseFloat(parts[1]) || 0,
-            parseFloat(parts[2]) || 0,
-            parseFloat(parts[3]) || 0
-          );
-        }
-      } else if (line.startsWith('f ')) {
-        // Parse face
-        const parts = line.split(/\s+/).slice(1);
-        if (parts.length >= 3) {
-          // Convert to triangles if needed
-          const indices = parts.map(part => {
-            const index = parseInt(part.split('/')[0]) - 1;
-            return index >= 0 ? index : 0;
-          });
-          
-          // Triangulate if more than 3 vertices
-          for (let i = 1; i < indices.length - 1; i++) {
-            faces.push(indices[0], indices[i], indices[i + 1]);
-          }
-        }
-      }
-    }
-    
-    if (vertices.length === 0) {
-      throw new Error('No vertices found in OBJ file');
-    }
-    
-    if (faces.length === 0) {
-      throw new Error('No faces found in OBJ file');
-    }
-    
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-    geometry.setIndex(faces);
-    geometry.computeVertexNormals();
-    
-    return geometry;
-  };
+  const zoomOut = useCallback(() => {
+    controlsRef.current.zoom = Math.max(0.1, controlsRef.current.zoom - 0.3);
+  }, []);
 
-  const toggleFullscreen = () => {
-    if (!isFullscreen) {
-      fullscreenRef.current?.requestFullscreen?.();
-    } else {
-      document.exitFullscreen?.();
-    }
-    setIsFullscreen(!isFullscreen);
-  };
+  const reloadModel = useCallback(() => {
+    resetView();
+    setWireframe(false);
+    setShowBoundingBox(false);
+    setIsLoading(true);
+    setError(null);
+    setRetryCount(0);
+    setReloadKey(prev => prev + 1);
+    controlsRef.current.autoRotate = true; // Re-enable auto-rotate on reload
+  }, [resetView]);
 
-  const downloadModel = () => {
-    const modelUrl = model.fileUrl || getModelFileUrl(model);
-    if (!modelUrl) return;
-    
-    // Get the proper filename for download
-    let downloadFileName = null;
-    if (model.objFiles && model.objFiles.length > 0) {
-      downloadFileName = model.objFiles[0].filename;
-    } else if (model.processor === "open3d" || model.processor === "meshroom") {
-      downloadFileName = "texturedMesh.obj";
-    } else {
-      downloadFileName = model.fileName || `${model.name}.obj`;
-    }
-    
-    const link = document.createElement('a');
-    link.href = modelUrl;
-    link.download = downloadFileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  const resetView = () => {
-    if (controlsRef.current) {
-      controlsRef.current.rotation = { x: 0, y: 0 };
-      controlsRef.current.zoom = 1;
-      controlsRef.current.pan = { x: 0, y: 0 };
-    }
-  };
-
-  const toggleWireframe = () => {
-    setWireframe(!wireframe);
-    if (modelObjectRef.current) {
-      modelObjectRef.current.material.wireframe = !wireframe;
-    }
-  };
+  if (!model || !model.fileUrl || !model.objFilename) {
+    return (
+      <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-2 sm:p-4">
+        <div className="bg-white rounded-xl p-3 sm:p-6 text-center max-w-sm">
+          <div className="text-red-500 text-2xl sm:text-3xl mb-3">⚠️</div>
+          <h3 className="text-base sm:text-lg font-bold mb-2">Invalid Model Data</h3>
+          <p className="text-gray-600 text-sm sm:text-base mb-3">Required model files are missing</p>
+          <button
+            onClick={onClose}
+            className="px-3 sm:px-4 py-1.5 sm:py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
       ref={fullscreenRef}
-      className="fixed inset-0 bg-black/80 flex items-center justify-center z-50"
+      className={`fixed inset-0 z-50 ${isFullscreen ? 'bg-black' : 'bg-black/80 flex items-center justify-center p-1 sm:p-2'}`}
     >
-      <div className={`relative bg-white rounded-lg shadow-xl ${isFullscreen ? 'w-full h-full' : 'w-full max-w-6xl h-[80vh]'}`}>
+      <div className={`${isFullscreen ? 'w-full h-full' : 'relative bg-white shadow-2xl w-full max-w-7xl h-[85vh] sm:h-[90vh] rounded-xl overflow-hidden'}`}>
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b bg-gray-50 rounded-t-lg">
-          <h3 className="text-lg font-bold text-gray-800">{model.name}</h3>
-          <div className="flex space-x-2">
-            <button 
-              onClick={() => setAutoRotate(!autoRotate)} 
-              title="Toggle Auto Rotate"
-              className={`p-2 rounded-md transition-colors ${autoRotate ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'} hover:bg-blue-600`}
-            >
-              <RotateCcw size={18} />
-            </button>
-            <button 
-              onClick={toggleWireframe}
-              title="Toggle Wireframe"
-              className={`p-2 rounded-md transition-colors ${wireframe ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'} hover:bg-blue-600`}
-            >
-              <Move size={18} />
-            </button>
-            <button 
-              onClick={resetView}
-              title="Reset View"
-              className="p-2 rounded-md bg-gray-200 text-gray-700 hover:bg-gray-300 transition-colors"
-            >
-              <ZoomOut size={18} />
-            </button>
-            <button 
-              onClick={downloadModel} 
-              title="Download" 
-              className="p-2 rounded-md bg-gray-200 text-gray-700 hover:bg-gray-300 transition-colors"
-            >
-              <Download size={18} />
-            </button>
-            <button 
-              onClick={toggleFullscreen} 
-              title="Toggle Fullscreen" 
-              className="p-2 rounded-md bg-gray-200 text-gray-700 hover:bg-gray-300 transition-colors"
-            >
-              {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
-            </button>
-            <button 
-              onClick={onClose} 
-              title="Close" 
-              className="p-2 rounded-md bg-red-500 text-white hover:bg-red-600 transition-colors"
-            >
-              <X size={18} />
-            </button>
+        <div className={`${isFullscreen ? 'absolute top-0 left-0 right-0 z-10 bg-black/70 backdrop-blur-sm' : 'bg-gradient-to-r from-gray-50 to-gray-100 rounded-t-xl border-b'} p-2 sm:p-4`}>
+          <div className="flex items-center justify-between flex-col sm:flex-row gap-2 sm:gap-0">
+            <div className="flex items-center justify-center sm:justify-start w-full sm:w-auto">
+              <h3 className={`text-base sm:text-lg font-bold truncate max-w-[80%] ${isFullscreen ? 'text-white' : 'text-gray-800'}`}>
+                {model.name || 'Untitled Model'}
+              </h3>
+              <div className={`text-xs sm:text-sm ${isFullscreen ? 'text-gray-300' : 'text-gray-600'} hidden md:block ml-2 sm:ml-4`}>
+                {modelInfo.vertices > 0 && (
+                  <span>
+                    {modelInfo.vertices.toLocaleString()} vertices • {modelInfo.faces.toLocaleString()} faces • {modelInfo.materials} materials • {fps} FPS
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center justify-center sm:justify-end flex-wrap gap-1 sm:gap-2">
+              <button
+                onClick={reloadModel}
+                title="Reload Model"
+                className="p-1.5 sm:p-2 rounded-lg bg-green-500 text-white hover:bg-green-600 transition-all text-xs sm:text-sm"
+              >
+                <RefreshCw size={16} className="sm:w-5 sm:h-5" />
+              </button>
+              <button
+                onClick={toggleWireframe}
+                title={`Wireframe ${wireframe ? 'ON' : 'OFF'} (W)`}
+                className={`p-1.5 sm:p-2 rounded-lg transition-all ${wireframe ? 'bg-blue-500 text-white shadow-lg hover:bg-blue-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'} text-xs sm:text-sm`}
+              >
+                <Move size={16} className="sm:w-5 sm:h-5" />
+              </button>
+              <button
+                onClick={zoomIn}
+                title="Zoom In (+)"
+                className="p-1.5 sm:p-2 rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition-all text-xs sm:text-sm"
+              >
+                <ZoomIn size={16} className="sm:w-5 sm:h-5" />
+              </button>
+              <button
+                onClick={zoomOut}
+                title="Zoom Out (-)"
+                className="p-1.5 sm:p-2 rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition-all text-xs sm:text-sm"
+              >
+                <ZoomOut size={16} className="sm:w-5 sm:h-5" />
+              </button>
+              <button
+                onClick={resetView}
+                title="Reset View (R)"
+                className="p-1.5 sm:p-2 rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition-all text-xs sm:text-sm"
+              >
+                <Minus size={16} className="sm:w-5 sm:h-5" />
+              </button>
+              <button
+                onClick={() => setShowBoundingBox(prev => !prev)}
+                title={`Bounding Box ${showBoundingBox ? 'ON' : 'OFF'} (B)`}
+                className={`p-1.5 sm:p-2 rounded-lg transition-all ${showBoundingBox ? 'bg-blue-500 text-white shadow-lg hover:bg-blue-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'} text-xs sm:text-sm`}
+              >
+                {showBoundingBox ? (
+                  <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                )}
+              </button>
+              <button
+                onClick={toggleFullscreen}
+                title={isFullscreen ? 'Exit Fullscreen (F)' : 'Enter Fullscreen (F)'}
+                className="p-1.5 sm:p-2 rounded-lg bg-gray-200 text-gray-700 hover:bg-gray-300 transition-all text-xs sm:text-sm"
+              >
+                {isFullscreen ? <Minimize2 size={16} className="sm:w-5 sm:h-5" /> : <Maximize2 size={16} className="sm:w-5 sm:h-5" />}
+              </button>
+              <button
+                onClick={onClose}
+                title="Close (Esc)"
+                className="p-1.5 sm:p-2 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-all text-xs sm:text-sm"
+              >
+                <X size={16} className="sm:w-5 sm:h-5" />
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* 3D Model Viewer */}
-        <div className="relative w-full h-full">
+        {/* 3D Viewer */}
+        <div className={`relative ${isFullscreen ? 'w-full h-full' : 'w-full h-[calc(100%-56px)] sm:h-[calc(100%-80px)] rounded-xl overflow-hidden'}`}>
           {isLoading && (
-            <div className="absolute inset-0 flex items-center justify-center bg-gray-100">
+            <div className="absolute inset-0 flex items-center justify-center bg-gray-100 z-20">
               <div className="text-center">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-                <p className="text-gray-600">Loading 3D model...</p>
+                <div className="animate-spin rounded-full h-10 w-10 sm:h-12 sm:w-12 border-b-2 border-blue-600 mb-3 sm:mb-4"></div>
+                <p className="text-gray-600 text-sm sm:text-base">Loading 3D model... {Math.round(loadingProgress)}%</p>
+                <p className="text-gray-500 text-xs sm:text-sm mt-2">{baseFolder}{model.objFilename}</p>
+                {retryCount > 0 && (
+                  <p className="text-yellow-600 text-xs sm:text-sm mt-2">Retry attempt {retryCount} of {maxRetries}</p>
+                )}
               </div>
             </div>
           )}
-          
           {error && (
-            <div className="absolute inset-0 flex items-center justify-center bg-gray-100">
+            <div className="absolute inset-0 flex items-center justify-center bg-gray-100 z-20">
               <div className="text-center">
-                <p className="text-red-600 mb-2">Error loading model</p>
-                <p className="text-gray-600 text-sm">{error}</p>
-                <button 
-                  onClick={loadModel}
-                  className="mt-4 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600"
+                <div className="text-red-500 text-2xl sm:text-3xl mb-3 sm:mb-4">⚠️</div>
+                <p className="text-red-600 text-sm sm:text-base mb-2">Error loading model</p>
+                <p className="text-gray-600 text-xs sm:text-sm mb-3 sm:mb-4">{error}</p>
+                <button
+                  onClick={reloadModel}
+                  className="px-3 sm:px-4 py-1.5 sm:py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-xs sm:text-sm"
                 >
                   Retry
                 </button>
               </div>
             </div>
           )}
-          
-          <div 
-            ref={mountRef} 
-            className="w-full h-full"
-            style={{ cursor: controlsRef.current?.isMouseDown ? 'grabbing' : 'grab' }}
-          />
-          
-          {/* Controls Info */}
-          <div className="absolute bottom-4 left-4 bg-black/70 text-white p-3 rounded-lg text-sm">
-            <p>• Drag to rotate</p>
-            <p>• Shift + Drag to pan</p>
-            <p>• Scroll to zoom</p>
+          <div ref={mountRef} className="w-full h-full bg-[#f8f9fa]" /> {/* Match scene background */}
+          <div className="absolute bottom-2 sm:bottom-4 left-2 sm:left-4 bg-black/70 text-white p-1 sm:p-2 rounded-lg text-xs sm:text-sm hidden md:block">
+            <p>• Drag to rotate (stops auto-rotation)</p>
+            <p>• Shift + Drag or Middle Click to pan</p>
+            <p>• Scroll or pinch to zoom</p>
+            <p>• R: Reset | W: Wireframe | F: Fullscreen</p>
+            <p>• B: Bounding Box</p>
           </div>
         </div>
       </div>

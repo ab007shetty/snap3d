@@ -1,8 +1,7 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Loader2, CheckCircle, Zap, Cpu } from 'lucide-react';
-import { useEffect } from 'react';
 
-export default function GenerateModel({
+export default function ModelGenerate({
   uploadType,
   selectedImages,
   selectedObjFiles,
@@ -12,16 +11,14 @@ export default function GenerateModel({
   setProcessor,
   isProcessing,
   processingStep,
+  processingSteps,
   handleGenerate,
   backendUp,
-  processingSteps,
 }) {
-
   useEffect(() => {
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-}, []);
-  // Ensure the component scrolls to the top when mounted
-  
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
   return (
     <div className="w-full max-w-none mx-auto">
       <div className="bg-white rounded-2xl shadow-xl border border-gray-100">
@@ -30,7 +27,7 @@ export default function GenerateModel({
           <p className="text-gray-600">
             {uploadType === 'images'
               ? `${selectedImages.length} images selected`
-              : `${selectedObjFiles.length} OBJ file(s) selected`}
+              : `${Object.keys(selectedObjFiles).length} OBJ file(s) selected`}
           </p>
         </div>
 
@@ -45,7 +42,6 @@ export default function GenerateModel({
             />
           </div>
 
-          {/* Processor selection only for images */}
           {uploadType === 'images' && (
             <div>
               <label className="block mb-2 font-semibold">Select Processor</label>
@@ -77,7 +73,6 @@ export default function GenerateModel({
             </div>
           )}
 
-          {/* Progress while processing */}
           {isProcessing ? (
             <div className="space-y-2">
               <div className="text-gray-800 font-semibold">Processing...</div>
@@ -100,7 +95,10 @@ export default function GenerateModel({
               </div>
               <button
                 onClick={handleGenerate}
-                className="px-6 py-3 rounded-lg bg-purple-600 text-white font-medium shadow hover:bg-purple-700"
+                disabled={!backendUp || isProcessing}
+                className={`px-6 py-3 rounded-lg font-medium shadow hover:bg-purple-700 transition ${
+                  !backendUp || isProcessing ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-purple-600 text-white'
+                }`}
               >
                 {uploadType === 'images' ? 'Generate Model' : 'Import Model'}
               </button>

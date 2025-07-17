@@ -2,14 +2,14 @@ import React, { useState, useEffect } from 'react';
 import { Upload, Sparkles, Folder } from 'lucide-react';
 import Alert from '../components/common/Alert';
 import ModelUpload from '../components/ModelUpload';
-import GenerateModel from '../components/GenerateModel';
+import ModelGenerate from '../components/ModelGenerate';
 import ModelLibrary from '../components/ModelLibrary';
 import ModelResult from '../components/ModelResult';
 
 export default function Snap3d() {
   const [uploadType, setUploadType] = useState('images');
   const [selectedImages, setSelectedImages] = useState([]);
-  const [selectedObjFiles, setSelectedObjFiles] = useState([]);
+  const [selectedObjFiles, setSelectedObjFiles] = useState({});
   const [modelName, setModelName] = useState('');
   const [processor, setProcessor] = useState('meshroom');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -29,18 +29,19 @@ export default function Snap3d() {
     'Generating mesh...',
     'Applying textures...',
     'Optimizing model...',
-    'Finalizing export...',
+    'Finalizing export...'
   ];
 
-  // Function to fetch models from backend
   const fetchModels = async () => {
     if (!backendUp) return;
-    
     try {
       const response = await fetch('http://localhost:3001/api/models');
       if (response.ok) {
         const models = await response.json();
         setSavedModels(models);
+        console.log('Fetched models:', models);
+      } else {
+        console.error('Failed to fetch models, status:', response.status);
       }
     } catch (error) {
       console.error('Failed to fetch models:', error);
@@ -49,23 +50,30 @@ export default function Snap3d() {
 
   useEffect(() => {
     fetch('http://localhost:3001/api/health')
-      .then(res => (res.ok ? setBackendUp(true) : setBackendUp(false)))
-      .catch(() => setBackendUp(false));
+      .then(res => {
+        setBackendUp(res.ok);
+        console.log('Backend health check:', res.ok ? 'Up' : 'Down');
+      })
+      .catch(() => {
+        setBackendUp(false);
+        console.log('Backend health check failed');
+      });
   }, []);
 
-  // Initial fetch when backend comes up
   useEffect(() => {
-    if (backendUp) {
-      fetchModels();
-    }
+    if (backendUp) fetchModels();
   }, [backendUp]);
 
   const handleNext = () => {
     const valid =
       (uploadType === 'images' && selectedImages.length >= 2) ||
-      (uploadType === 'import' && selectedObjFiles.length > 0);
+      (uploadType === 'import' && selectedObjFiles.obj);
     if (!valid) {
-      setError(uploadType === 'images' ? 'Upload at least 2 images' : 'Upload at least 1 OBJ file');
+      setError(
+        uploadType === 'images'
+          ? 'Upload at least 2 images'
+          : 'Upload at least one .obj file (MTL is optional)'
+      );
       return;
     }
     setShowGenerateUI(true);
@@ -80,62 +88,107 @@ export default function Snap3d() {
 
     try {
       const formData = new FormData();
-      selectedImages.forEach(img => formData.append('images', img.file));
-      selectedObjFiles.forEach(obj => formData.append('objFiles', obj.file));
-      if (modelName) formData.append('modelName', modelName);
-      formData.append('processor', processor);
+      console.log('Preparing FormData:', { uploadType, modelName, processor, selectedImagesLength: selectedImages.length, selectedObjFiles });
+      if (uploadType === 'images') {
+        if (selectedImages.length < 2) throw new Error('At least 2 images are required');
+        selectedImages.forEach((img, index) => {
+          formData.append(`images[${index}]`, img.file, img.name);
+        });
+        formData.append('processor', processor);
+      } else {
+        if (!selectedObjFiles.obj) throw new Error('Please select an .obj file');
+        formData.append('obj', selectedObjFiles.obj.file, selectedObjFiles.obj.name);
+        if (selectedObjFiles.mtl) {
+          formData.append('mtl', selectedObjFiles.mtl.file, selectedObjFiles.mtl.name);
+        }
+        formData.append('processor', 'import');
+      }
+      if (modelName.trim()) formData.append('modelName', modelName.trim());
 
-      const { modelId } = await (await fetch('http://localhost:3001/api/upload', { method: 'POST', body: formData })).json();
+      const formDataEntries = {};
+      formData.forEach((value, key) => {
+        formDataEntries[key] = value instanceof File ? value.name : value;
+      });
+      console.log('FormData sent:', formDataEntries);
+
+      const response = await fetch('http://localhost:3001/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Upload failed: ${response.status} - ${errorText}`);
+      }
+      const { modelId } = await response.json();
+      console.log('Model uploaded, ID:', modelId);
 
       let status = 'processing';
       let pollStep = 0;
-      while (status === 'processing' || status === 'queued') {
-        setProcessingStep(Math.min(pollStep, processingSteps.length - 1));
-        await new Promise(r => setTimeout(r, 2000));
-        const { status: newStatus, error: e } = await (await fetch(`http://localhost:3001/api/models/${modelId}/status`)).json();
-        status = newStatus;
-        if (e) throw new Error(e);
-        pollStep++;
+      if (uploadType === 'images') {
+        while (status === 'processing' || status === 'queued') {
+          setProcessingStep(Math.min(pollStep, processingSteps.length - 1));
+          await new Promise(r => setTimeout(r, 2000));
+          const statusResponse = await fetch(`http://localhost:3001/api/models/${modelId}/status`);
+          if (!statusResponse.ok) throw new Error(`Status check failed: ${statusResponse.statusText}`);
+          const { status: newStatus, error: e } = await statusResponse.json();
+          status = newStatus;
+          if (e) throw new Error(e);
+          pollStep++;
+        }
+      } else {
+        status = 'completed';
       }
 
-      const infoJson = await (await fetch(`http://localhost:3001/api/models/${modelId}`)).json();
+      const infoResponse = await fetch(`http://localhost:3001/api/models/${modelId}`);
+      if (!infoResponse.ok) throw new Error(`Failed to fetch model info: ${infoResponse.statusText}`);
+      const infoJson = await infoResponse.json();
       const files = await fetchModelFiles(modelId);
       const file = files.find(f => ['obj', 'stl', 'ply'].includes(f.extension));
-      const fileUrl = file ? `http://localhost:3001/models/${processor}/${modelId}/${file.name}` : null;
 
-    const newModel = {
-      id: modelId,
-      name: infoJson.name || modelName || `Model_${Date.now()}`,
-      fileUrl,
-      format: file?.extension?.toUpperCase() || null,
-      files,
-      thumbnail: infoJson.images?.[0]?.filename
-        ? `http://localhost:3001/uploads/${infoJson.images[0].filename}`
-        : selectedImages[0]?.url || '/placeholder-3d.png',
-      createdAt: new Date().toISOString(),
-      imageCount: infoJson.images?.length || selectedImages.length,
-      objCount: infoJson.objFiles?.length || selectedObjFiles.length,
-      processor: infoJson.processor,
-      type: infoJson.processor === 'import' ? 'import' : 'images',
+      let cleanModelName = modelName.trim() || selectedObjFiles.obj?.name.replace(/\.obj$/i, '') || `Model_${Date.now()}`;
+      if (infoJson.name) {
+        cleanModelName = infoJson.name.replace(/^\d+-[0-9a-f-]+/i, '').replace(/\.obj$/i, '') || infoJson.name;
+      }
+      const objFilename = `${cleanModelName}.obj`;
+      const mtlFilename = selectedObjFiles.mtl ? `${cleanModelName}.mtl` : null;
 
-      /* keep the backend data */
-      objFiles: infoJson.objFiles || [],
+      const fileUrl = `http://localhost:3001/models/${infoJson.processor}/${modelId}`; // Force fileUrl even if files is empty
 
-      /* new stats */
-      vertices: infoJson.vertices || 0,
-      triangles: infoJson.triangles || 0,
-      sizeX: infoJson.sizeX || 0,
-      sizeY: infoJson.sizeY || 0,
-      sizeZ: infoJson.sizeZ || 0,
-      size: file?.size || 0,
-    };
+      const newModel = {
+        id: modelId,
+        name: cleanModelName,
+        fileUrl,
+        objFilename,
+        mtlFilename,
+        format: file?.extension?.toUpperCase() || 'OBJ',
+        files,
+        thumbnail: uploadType === 'images'
+          ? infoJson.images?.[0]?.filename
+            ? `http://localhost:3001/uploads/${infoJson.images[0].filename}`
+            : selectedImages[0]?.url || '/placeholder-3d.png'
+          : '/placeholder-3d.png',
+        createdAt: new Date().toISOString(),
+        imageCount: infoJson.images?.length || selectedImages.length,
+        objCount: uploadType === 'import' ? (selectedObjFiles.mtl ? 2 : 1) : 0,
+        processor: infoJson.processor,
+        type: uploadType,
+        objFiles: infoJson.objFiles || (uploadType === 'import' ? [
+          { filename: objFilename },
+          ...(selectedObjFiles.mtl ? [{ filename: mtlFilename }] : [])
+        ] : []),
+        vertices: infoJson.vertices || 0,
+        triangles: infoJson.triangles || 0,
+        sizeX: infoJson.sizeX || 0,
+        sizeY: infoJson.sizeY || 0,
+        sizeZ: infoJson.sizeZ || 0,
+        size: file?.size || 0,
+      };
 
+      console.log('New model data:', newModel);
       setGenerated3DModel(newModel);
-      
-      // Refresh library after successful generation
       fetchModels();
-      
     } catch (err) {
+      console.error('Error in handleGenerate:', err);
       setError(err.message || 'Processing failed');
     } finally {
       setIsProcessing(false);
@@ -144,16 +197,19 @@ export default function Snap3d() {
 
   const fetchModelFiles = async id => {
     try {
-      const { files } = await (await fetch(`http://localhost:3001/api/models/${id}/files`)).json();
+      const response = await fetch(`http://localhost:3001/api/models/${id}/files`);
+      if (!response.ok) throw new Error(`Failed to fetch model files: ${response.statusText}`);
+      const { files } = await response.json();
       return files || [];
-    } catch {
+    } catch (err) {
+      console.error('Failed to fetch model files:', err);
       return [];
     }
   };
 
   const clearAll = () => {
     setSelectedImages([]);
-    setSelectedObjFiles([]);
+    setSelectedObjFiles({});
     setModelName('');
     setGenerated3DModel(null);
     setShowGenerateUI(false);
@@ -164,22 +220,10 @@ export default function Snap3d() {
   };
 
   const handleNewModel = () => clearAll();
-  
-  const handleDownloadModel = () => {
-    if (generated3DModel?.fileUrl) {
-      const a = document.createElement('a');
-      a.href = generated3DModel.fileUrl;
-      a.download = `${generated3DModel.name}.${generated3DModel.format?.toLowerCase()}`;
-      a.click();
-    }
-  };
 
-  // Updated tab change handler that fetches models when switching to library
   const handleTabChange = (tab) => {
     setActiveTab(tab);
-    
     if (tab === 'library') {
-      // Refresh library when switching to library tab
       fetchModels();
       setGenerated3DModel(null);
     } else if (tab === 'generate') {
@@ -229,7 +273,7 @@ export default function Snap3d() {
             />
           )}
           {showGenerateUI && !generated3DModel && (
-            <GenerateModel
+            <ModelGenerate
               selectedImages={selectedImages}
               selectedObjFiles={selectedObjFiles}
               uploadType={uploadType}
@@ -241,12 +285,13 @@ export default function Snap3d() {
               processingStep={processingStep}
               processingSteps={processingSteps}
               handleGenerate={handleGenerate}
+              backendUp={backendUp}
             />
           )}
           {generated3DModel && (
             <ModelResult
               generated3DModel={generated3DModel}
-              onDownload={handleDownloadModel}
+              onDownload={null}
               onNewModel={handleNewModel}
             />
           )}
@@ -258,7 +303,7 @@ export default function Snap3d() {
           setSavedModels={setSavedModels}
           setActiveTab={setActiveTab}
           setError={setError}
-          onRefresh={fetchModels} // Pass refresh function to library
+          onRefresh={fetchModels}
         />
       )}
     </div>

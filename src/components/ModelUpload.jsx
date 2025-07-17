@@ -26,30 +26,67 @@ export default function ModelUpload({
         size: f.size,
       }));
       setSelectedImages(prev => [...prev, ...imgs]);
+      setError(null);
     } else {
       const objFiles = files.filter(f => f.name.toLowerCase().endsWith('.obj'));
-      const objs = objFiles.map(f => ({
-        file: f,
-        name: f.name,
-        size: f.size,
-      }));
-      setSelectedObjFiles(prev => [...prev, ...objs]);
-    }
+      const mtlFiles = files.filter(f => f.name.toLowerCase().endsWith('.mtl'));
 
-    setError(null);
+      if (objFiles.length !== 1) {
+        setError('Please select exactly one .obj file.');
+        return;
+      }
+
+      if (mtlFiles.length > 1) {
+        setError('Only one .mtl file is allowed.');
+        return;
+      }
+
+      const invalidFiles = files.filter(
+        f => !f.name.toLowerCase().endsWith('.obj') && !f.name.toLowerCase().endsWith('.mtl')
+      );
+      if (invalidFiles.length > 0) {
+        setError('Only .obj and .mtl files are allowed for import.');
+        return;
+      }
+
+      setSelectedObjFiles(prev => {
+        const newObjFiles = { ...prev };
+        newObjFiles.obj = {
+          file: objFiles[0],
+          name: objFiles[0].name,
+          size: objFiles[0].size,
+        };
+        if (mtlFiles.length === 1) {
+          newObjFiles.mtl = {
+            file: mtlFiles[0],
+            name: mtlFiles[0].name,
+            size: mtlFiles[0].size,
+          };
+        } else {
+          delete newObjFiles.mtl;
+        }
+        return newObjFiles;
+      });
+
+      setError(null);
+    }
   };
 
-  const removeItem = (index, type) => {
-    if (type === 'images') {
-      setSelectedImages(prev => prev.filter((_, i) => i !== index));
+  const removeItem = (type) => {
+    if (uploadType === 'images') {
+      setSelectedImages(prev => prev.filter((_, index) => index !== type));
     } else {
-      setSelectedObjFiles(prev => prev.filter((_, i) => i !== index));
+      setSelectedObjFiles(prev => {
+        const newObjFiles = { ...prev };
+        delete newObjFiles[type];
+        return newObjFiles;
+      });
     }
   };
 
   const ready =
     (uploadType === 'images' && selectedImages.length >= 2) ||
-    (uploadType === 'import' && selectedObjFiles.length >= 1);
+    (uploadType === 'import' && selectedObjFiles.obj);
 
   const formatFileSize = (bytes) => {
     if (bytes === 0) return '0 Bytes';
@@ -109,8 +146,8 @@ export default function ModelUpload({
                     <Box className="w-6 h-6" />
                   </div>
                   <div className="text-left">
-                    <h4 className="font-semibold text-gray-900">Import OBJ</h4>
-                    <p className="text-sm text-gray-600">Use existing 3D model files</p>
+                    <h4 className="font-semibold text-gray-900">Import OBJ & MTL</h4>
+                    <p className="text-sm text-gray-600">Use existing 3D model files (.obj required, .mtl optional)</p>
                   </div>
                 </div>
               </button>
@@ -122,10 +159,10 @@ export default function ModelUpload({
             <div className="border-2 border-dashed border-gray-300 p-12 rounded-2xl text-center hover:border-blue-500 hover:bg-blue-50">
               <Upload className="w-8 h-8 text-blue-600 mx-auto mb-4" />
               <p className="text-lg font-semibold">
-                {uploadType === 'images' ? 'Upload Images' : 'Upload OBJ Files'}
+                {uploadType === 'images' ? 'Upload Images' : 'Upload OBJ & Optional MTL File'}
               </p>
               <p className="text-gray-600">
-                {uploadType === 'images' ? 'Minimum 2 images required' : 'Single OBJ required'}
+                {uploadType === 'images' ? 'Minimum 2 images required' : '.obj required, .mtl optional'}
               </p>
             </div>
           </label>
@@ -134,10 +171,17 @@ export default function ModelUpload({
             ref={fileInputRef}
             type="file"
             multiple
-            accept={uploadType === 'images' ? 'image/*' : '.obj'}
+            accept={uploadType === 'images' ? 'image/*' : '.obj,.mtl'}
             onChange={handleSelect}
             className="hidden"
           />
+
+          {/* Error Message */}
+          {error && (
+            <div className="mb-4 p-4 bg-red-50 text-red-600 rounded-lg">
+              {error}
+            </div>
+          )}
 
           {/* File Preview */}
           {uploadType === 'images' && selectedImages.length > 0 && (
@@ -145,7 +189,7 @@ export default function ModelUpload({
               {selectedImages.map((img, i) => (
                 <div key={i} className="relative group">
                   <img src={img.url} className="rounded-lg object-cover aspect-square" />
-                  <button onClick={() => removeItem(i, 'images')} className="absolute top-2 right-2 bg-red-600 p-1 rounded-full text-white">
+                  <button onClick={() => removeItem(i)} className="absolute top-2 right-2 bg-red-600 p-1 rounded-full text-white">
                     <Trash2 className="w-4 h-4" />
                   </button>
                   <div className="text-sm mt-1 text-gray-700 truncate">{img.name}</div>
@@ -154,16 +198,24 @@ export default function ModelUpload({
             </div>
           )}
 
-          {uploadType === 'import' && selectedObjFiles.length > 0 && (
+          {uploadType === 'import' && (selectedObjFiles.obj || selectedObjFiles.mtl) && (
             <div className="space-y-3 mb-8">
-              {selectedObjFiles.map((file, i) => (
-                <div key={i} className="flex items-center justify-between bg-gray-100 px-4 py-2 rounded-lg">
-                  <span className="text-sm">{file.name}</span>
-                  <button onClick={() => removeItem(i, 'import')} className="text-red-600">
+              {selectedObjFiles.obj && (
+                <div className="flex items-center justify-between bg-gray-100 px-4 py-2 rounded-lg">
+                  <span className="text-sm">{selectedObjFiles.obj.name} ({formatFileSize(selectedObjFiles.obj.size)})</span>
+                  <button onClick={() => removeItem('obj')} className="text-red-600">
                     <Trash2 className="w-4 h-4" />
                   </button>
                 </div>
-              ))}
+              )}
+              {selectedObjFiles.mtl && (
+                <div className="flex items-center justify-between bg-gray-100 px-4 py-2 rounded-lg">
+                  <span className="text-sm">{selectedObjFiles.mtl.name} ({formatFileSize(selectedObjFiles.mtl.size)})</span>
+                  <button onClick={() => removeItem('mtl')} className="text-red-600">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -178,7 +230,7 @@ export default function ModelUpload({
               ) : (
                 uploadType === 'images'
                   ? `${selectedImages.length}/2 images required`
-                  : `${selectedObjFiles.length}/1 OBJ required`
+                  : `${selectedObjFiles.obj ? 1 : 0}/1 .obj file required${selectedObjFiles.mtl ? ', .mtl attached' : ', .mtl optional'}`
               )}
             </div>
             <button

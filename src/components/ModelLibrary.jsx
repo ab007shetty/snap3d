@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  Folder, Download, Eye, Trash2, Search, Grid3x3, X
+  Folder, Download, Eye, Trash2, Search, Grid3x3, X, Archive
 } from 'lucide-react';
 import ModelResult from './ModelResult';
 import EnhancedModelPreviewModal from './ModelPreview';
@@ -12,23 +12,32 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
   const [selectedModels, setSelectedModels] = useState([]);
   const [previewModel, setPreviewModel] = useState(null);
   const [showFullPreview, setShowFullPreview] = useState(false);
+  const [downloadingModels, setDownloadingModels] = useState(new Set());
 
-  // Get model file URL - consistent with backend structure
-  const getModelFileUrl = (model) => {
+  // Get model base folder URL - returns directory path only
+  const getModelBaseUrl = (model) => {
     if (!model || !model.id || !model.processor) return null;
-    
-    const processor = model.processor;
-    let fileName = null;
-    
+    return `http://localhost:3001/models/${model.processor}/${model.id}`;
+  };
+
+  // Get model file details
+  const getModelFileDetails = (model) => {
+    let objFilename = null;
+    let mtlFilename = null;
+
     if (model.objFiles && model.objFiles.length > 0) {
-      fileName = model.objFiles[0].filename;
-    } else if (processor === "open3d" || processor === "meshroom") {
-      fileName = "texturedMesh.obj";
+      // Prefer objFiles from status.json
+      objFilename = model.objFiles.find(f => f.filename.endsWith('.obj'))?.filename || `${model.name}.obj`;
+      mtlFilename = model.objFiles.find(f => f.filename.endsWith('.mtl'))?.filename || `${model.name}.mtl`;
+    } else if (model.processor === "open3d" || model.processor === "meshroom") {
+      objFilename = "texturedMesh.obj";
+      mtlFilename = "texturedMesh.mtl";
     } else {
-      fileName = model.fileName || `${model.name}.obj`;
+      objFilename = model.fileName || `${model.name}.obj`;
+      mtlFilename = `${model.name}.mtl`;
     }
-    
-    return `http://localhost:3001/models/${processor}/${model.id}/${fileName}`;
+
+    return { objFilename, mtlFilename };
   };
 
   const filtered = savedModels
@@ -56,30 +65,68 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
     }
   };
 
-  // Download function with proper filename
-  const download = (model) => {
-    const fileUrl = getModelFileUrl(model);
-    if (!fileUrl) {
-      console.error('No file URL available for model:', model);
+  // Download single model as ZIP
+  const downloadModel = async (model) => {
+    try {
+      const modelId = model.id;
+      setDownloadingModels(prev => new Set([...prev, modelId]));
+      
+      console.log('Attempting download for model ID:', modelId, 'Model data:', model);
+      
+      const response = await fetch(`http://localhost:3001/api/models/${modelId}/download-all`, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/zip',
+        },
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+      }
+      
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${model.name || modelId}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      
+      console.log('Download completed for model:', modelId);
+    } catch (err) {
+      console.error('Download error:', err);
+      alert(`Failed to download the model: ${err.message}`);
+    } finally {
+      setDownloadingModels(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(model.id);
+        return newSet;
+      });
+    }
+  };
+
+  // Download multiple models as individual ZIPs
+  const downloadSelectedModels = async () => {
+    const modelsToDownload = filtered.filter(m => selectedModels.includes(m.id));
+    
+    if (modelsToDownload.length === 0) {
+      alert('No models selected for download');
       return;
     }
-    
-    // Get the actual filename for download
-    let downloadFileName = null;
-    if (model.objFiles && model.objFiles.length > 0) {
-      downloadFileName = model.objFiles[0].filename;
-    } else if (model.processor === "open3d" || model.processor === "meshroom") {
-      downloadFileName = "texturedMesh.obj";
-    } else {
-      downloadFileName = model.fileName || `${model.name}.obj`;
+
+    if (modelsToDownload.length === 1) {
+      await downloadModel(modelsToDownload[0]);
+      return;
     }
-    
-    const link = document.createElement('a');
-    link.href = fileUrl;
-    link.download = downloadFileName;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+
+    // Download multiple models sequentially to avoid overwhelming the server
+    for (const model of modelsToDownload) {
+      await downloadModel(model);
+      // Small delay between downloads
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
   };
 
   const deleteModels = async (ids) => {
@@ -91,6 +138,7 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
       setSelectedModels([]);
     } catch (error) {
       console.error('Error deleting models:', error);
+      alert('Failed to delete some models. Please try again.');
     }
   };
 
@@ -102,43 +150,35 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
   // Select all function
   const selectAll = () => {
     if (selectedModels.length === filtered.length) {
-      // If all are selected, deselect all
       setSelectedModels([]);
     } else {
-      // Select all filtered models
       setSelectedModels(filtered.map(m => m.id));
     }
   };
 
   // Preview function with proper filename handling
   const handlePreview = (model) => {
-    const fileUrl = getModelFileUrl(model);
-    if (!fileUrl) {
-      console.error('Cannot generate preview URL for model:', model);
+    const baseUrl = getModelBaseUrl(model);
+    if (!baseUrl) {
+      console.error('Cannot generate base URL for model:', model);
       return;
     }
-    
-    // Get the actual filename
-    let actualFileName = null;
-    if (model.objFiles && model.objFiles.length > 0) {
-      actualFileName = model.objFiles[0].filename;
-    } else if (model.processor === "open3d" || model.processor === "meshroom") {
-      actualFileName = "texturedMesh.obj";
-    } else {
-      actualFileName = model.fileName || `${model.name}.obj`;
-    }
-    
+
+    const { objFilename, mtlFilename } = getModelFileDetails(model);
+
     const previewModelData = {
       ...model,
-      fileUrl: fileUrl,
-      // Ensure all required fields are present with correct filename
+      fileUrl: baseUrl,
+      objFilename,
+      mtlFilename,
       name: model.name || 'Untitled Model',
-      fileName: actualFileName,
-      id: model.id
+      id: model.id,
+      processor: model.processor || 'import'
     };
-    
-    console.log('Preview model data:', previewModelData); // Debug log
-    console.log('Generated URL:', fileUrl); // Debug log
+
+    console.log('Preview model data:', previewModelData);
+    console.log('OBJ URL:', `${baseUrl}/${objFilename}`);
+    console.log('MTL URL:', `${baseUrl}/${mtlFilename}`);
     setPreviewModel(previewModelData);
     setShowFullPreview(true);
   };
@@ -202,7 +242,7 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
             </div>
           </div>
 
-          {/* Select All and Bulk Actions - Only show when models are selected */}
+          {/* Select All and Bulk Actions */}
           {selectedModels.length > 0 && (
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center space-x-4">
@@ -224,13 +264,24 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
                 </span>
               </div>
 
-              <button
-                onClick={() => deleteModels(selectedModels)}
-                className="flex items-center space-x-2 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition"
-              >
-                <Trash2 className="w-4 h-4" />
-                <span>Delete Selected ({selectedModels.length})</span>
-              </button>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={downloadSelectedModels}
+                  disabled={selectedModels.length === 0}
+                  className="flex items-center space-x-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Archive className="w-4 h-4" />
+                  <span>Download Selected ({selectedModels.length})</span>
+                </button>
+                
+                <button
+                  onClick={() => deleteModels(selectedModels)}
+                  className="flex items-center space-x-2 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Delete Selected ({selectedModels.length})</span>
+                </button>
+              </div>
             </div>
           )}
 
@@ -274,11 +325,21 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
                   
                   <div className="flex space-x-2">
                     <button
-                      onClick={() => download(m)}
-                      className="flex-1 flex items-center justify-center space-x-1 bg-indigo-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-indigo-700 transition"
+                      onClick={() => downloadModel(m)}
+                      disabled={downloadingModels.has(m.id)}
+                      className="flex-1 flex items-center justify-center space-x-1 bg-indigo-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      <Download className="w-4 h-4" />
-                      <span>Download</span>
+                      {downloadingModels.has(m.id) ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                          <span>Downloading...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Archive className="w-4 h-4" />
+                          <span>Download ZIP</span>
+                        </>
+                      )}
                     </button>
                     <button
                       onClick={() => handlePreview(m)}
