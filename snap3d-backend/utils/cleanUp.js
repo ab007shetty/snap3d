@@ -9,8 +9,14 @@ export async function cleanupTempFolders() {
     const dirPath = path.join(process.cwd(), folder);
     try {
       if (await fs.pathExists(dirPath)) {
-        await fs.emptyDir(dirPath); // safer: clears but keeps folder
-        console.log(`✅ Cleaned: ${dirPath}`);
+        const files = await fs.readdir(dirPath);
+        for (const file of files) {
+          if (file !== ".gitkeep") {
+            const filePath = path.join(dirPath, file);
+            await fs.remove(filePath);
+          }
+        }
+        console.log(`✅ Cleaned (preserved .gitkeep): ${dirPath}`);
       }
     } catch (err) {
       console.error(`❌ Failed to clean ${dirPath}:`, err);

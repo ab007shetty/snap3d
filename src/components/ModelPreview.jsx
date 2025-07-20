@@ -25,12 +25,11 @@ export default function ModelPreview({ model, onClose }) {
     isPinching: false,
     autoRotateSpeed: 0.005,
     dampingFactor: 0.1,
-    autoRotate: true // Auto-rotate enabled by default
+    autoRotate: true,
   });
   const initialCameraDistance = useRef(5);
   const modelBounds = useRef({ center: new THREE.Vector3(), size: new THREE.Vector3() });
 
-  // UI States
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -43,25 +42,24 @@ export default function ModelPreview({ model, onClose }) {
   const fpsRef = useRef({ frames: 0, lastTime: performance.now() });
   const [retryCount, setRetryCount] = useState(0);
   const maxRetries = 3;
-  const [baseFolder, setBaseFolder] = useState(`http://localhost:3001/models/import/${model?.id || ''}/`);
+  const [baseFolder, setBaseFolder] = useState(
+    model?.processor && model?.id
+      ? `http://localhost:3001/models/${model.processor}/${model.id}/`
+      : ''
+  );
 
-  // Handle keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.target.matches('input, textarea, button')) return;
       if (e.key === 'Escape') {
         isFullscreen ? exitFullscreen() : onClose();
       } else if (e.key === 'r') {
-        e.preventDefault();
         resetView();
       } else if (e.key === 'f') {
-        e.preventDefault();
         toggleFullscreen();
       } else if (e.key === 'w') {
-        e.preventDefault();
         toggleWireframe();
       } else if (e.key === 'b') {
-        e.preventDefault();
         setShowBoundingBox(prev => !prev);
       }
     };
@@ -69,14 +67,12 @@ export default function ModelPreview({ model, onClose }) {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isFullscreen, onClose]);
 
-  // Handle fullscreen changes
   useEffect(() => {
     const handleFullscreenChange = () => setIsFullscreen(!!document.fullscreenElement);
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
-  // Update wireframe
   useEffect(() => {
     if (modelObjectRef.current) {
       modelObjectRef.current.traverse(child => {
@@ -94,7 +90,6 @@ export default function ModelPreview({ model, onClose }) {
     }
   }, [wireframe]);
 
-  // Update bounding box
   useEffect(() => {
     if (sceneRef.current) {
       sceneRef.current.children.forEach(child => {
@@ -105,7 +100,6 @@ export default function ModelPreview({ model, onClose }) {
     }
   }, [showBoundingBox]);
 
-  // Lighting setup
   const setupLighting = useCallback((scene) => {
     lightsRef.current.forEach(light => scene.remove(light));
     lightsRef.current = [];
@@ -123,14 +117,12 @@ export default function ModelPreview({ model, onClose }) {
 
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
 
-    const lights = [dirLight1, dirLight2, pointLight, ambientLight];
-    lights.forEach(light => {
+    [dirLight1, dirLight2, pointLight, ambientLight].forEach(light => {
       scene.add(light);
       lightsRef.current.push(light);
     });
   }, []);
 
-  // FPS monitoring
   useEffect(() => {
     const updateFps = () => {
       fpsRef.current.frames++;
@@ -145,30 +137,26 @@ export default function ModelPreview({ model, onClose }) {
     return () => clearInterval(interval);
   }, []);
 
-  // Main 3D setup
   useEffect(() => {
     if (!mountRef.current || !model) return;
 
     console.log('ModelPreview - Model data:', model);
 
-    // Initialize scene
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf8f9fa); // Reverted to white background
+    scene.background = new THREE.Color(0xf8f9fa);
     scene.fog = new THREE.Fog(0xf8f9fa, 50, 200);
     sceneRef.current = scene;
 
-    // Initialize camera
     const width = isFullscreen ? window.innerWidth : mountRef.current.clientWidth;
     const height = isFullscreen ? window.innerHeight : mountRef.current.clientHeight;
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
     cameraRef.current = camera;
 
-    // Initialize renderer
     const renderer = new THREE.WebGLRenderer({
       antialias: true,
       alpha: true,
       powerPreference: 'high-performance',
-      precision: 'mediump'
+      precision: 'mediump',
     });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -180,89 +168,81 @@ export default function ModelPreview({ model, onClose }) {
     rendererRef.current = renderer;
     mountRef.current.appendChild(renderer.domElement);
 
-    // Log WebGL capabilities
     console.log('WebGL Capabilities:', {
       version: renderer.getContext().getParameter(renderer.getContext().VERSION),
       maxTextureSize: renderer.getContext().getParameter(renderer.getContext().MAX_TEXTURE_SIZE),
-      renderer: renderer.info.render
+      renderer: renderer.info.render,
     });
 
-    // Setup lighting
     setupLighting(scene);
 
-    // Load model
     const loadModel = async () => {
       try {
         setIsLoading(true);
         setError(null);
         setLoadingProgress(0);
 
-        // Reset controls for centering
         controlsRef.current.rotation = { x: 0, y: 0 };
         controlsRef.current.pan = { x: 0, y: 0 };
         controlsRef.current.zoom = 1;
-        controlsRef.current.autoRotate = true; // Enable auto-rotate on load
+        controlsRef.current.autoRotate = true;
 
-        if (!baseFolder || !model.objFilename || !model.mtlFilename) {
+        if (!baseFolder || !model.objFilename) {
           throw new Error('Missing model file URLs or filenames');
         }
-        console.log('Base folder:', baseFolder);
 
-        // Simulate loading progress
+        console.log('Base folder:', baseFolder);
+        console.log('OBJ Filename:', model.objFilename);
+        console.log('MTL Filename:', model.mtlFilename);
+
         const progressInterval = setInterval(() => {
           setLoadingProgress(prev => Math.min(prev + 10, 90));
         }, 100);
 
-        // Load MTL
         const mtlLoader = new MTLLoader();
         mtlLoader.setPath(baseFolder);
         mtlLoader.setResourcePath(baseFolder);
-        const mtlUrl = `${baseFolder}${model.mtlFilename}`;
-        console.log('Attempting to load MTL:', mtlUrl);
+        const mtlUrl = model.mtlFilename ? `${baseFolder}${model.mtlFilename}` : null;
 
         let materials;
-        try {
-          materials = await mtlLoader.loadAsync(model.mtlFilename, xhr => {
-            console.log(`MTL loading: ${(xhr.loaded / xhr.total * 100).toFixed(2)}%`);
-            setLoadingProgress((xhr.loaded / xhr.total) * 50);
-          });
+        if (mtlUrl) {
+          try {
+            materials = await mtlLoader.loadAsync(model.mtlFilename, xhr => {
+              console.log(`MTL loading: ${(xhr.loaded / xhr.total * 100).toFixed(2)}%`);
+              setLoadingProgress((xhr.loaded / xhr.total) * 50);
+            });
 
-          const textureLoader = new THREE.TextureLoader();
-          for (const mat of Object.values(materials.materials)) {
-            if (mat.map?.sourceFile) {
-              const textureUrl = `${baseFolder}${mat.map.sourceFile}`;
-              console.log('Loading texture:', textureUrl);
-              try {
-                const texture = await textureLoader.loadAsync(textureUrl);
-                texture.flipY = false;
-                texture.encoding = THREE.sRGBEncoding;
-                mat.map = texture;
-                mat.needsUpdate = true;
-              } catch (texError) {
-                console.warn('Texture load failed:', textureUrl, texError);
-                mat.map = null;
-                mat.needsUpdate = true;
+            const textureLoader = new THREE.TextureLoader();
+            for (const mat of Object.values(materials.materials)) {
+              if (mat.map?.sourceFile) {
+                const textureUrl = `${baseFolder}${mat.map.sourceFile}`;
+                try {
+                  const texture = await textureLoader.loadAsync(textureUrl);
+                  texture.flipY = false;
+                  texture.encoding = THREE.sRGBEncoding;
+                  mat.map = texture;
+                  mat.needsUpdate = true;
+                } catch (texError) {
+                  console.warn('Texture load failed:', textureUrl, texError);
+                  mat.map = null;
+                  mat.needsUpdate = true;
+                }
               }
+              mat.roughness = mat.roughness ?? 0.8;
+              mat.metalness = mat.metalness ?? 0.2;
+              mat.side = THREE.DoubleSide;
+              mat.needsUpdate = true;
             }
-            mat.roughness = mat.roughness ?? 0.8;
-            mat.metalness = mat.metalness ?? 0.2;
-            mat.side = THREE.DoubleSide;
-            mat.needsUpdate = true;
+            materials.preload();
+          } catch (mtlError) {
+            console.warn('MTL loading failed, using fallback material:', mtlError.message);
+            materials = null;
           }
-          materials.preload();
-          console.log('MTL materials loaded:', materials);
-        } catch (mtlError) {
-          console.warn('MTL loading failed, using fallback material:', mtlError);
-          materials = null;
         }
 
-        // Load OBJ
         const objLoader = new OBJLoader();
         if (materials) objLoader.setMaterials(materials);
         objLoader.setPath(baseFolder);
-        const objUrl = `${baseFolder}${model.objFilename}`;
-        console.log('Attempting to load OBJ:', objUrl);
-
         const object = await objLoader.loadAsync(model.objFilename, xhr => {
           console.log(`OBJ loading: ${(xhr.loaded / xhr.total * 100).toFixed(2)}%`);
           setLoadingProgress(50 + (xhr.loaded / xhr.total) * 50);
@@ -271,7 +251,6 @@ export default function ModelPreview({ model, onClose }) {
         clearInterval(progressInterval);
         setLoadingProgress(100);
 
-        // Validate geometry
         let vertexCount = 0;
         let faceCount = 0;
         let materialCount = 0;
@@ -298,34 +277,32 @@ export default function ModelPreview({ model, onClose }) {
 
         setModelInfo({ vertices: vertexCount, faces: faceCount, materials: materialCount });
 
-        // Center and scale with offset to top-right
         const box = new THREE.Box3().setFromObject(object);
         const center = box.getCenter(new THREE.Vector3());
         const size = box.getSize(new THREE.Vector3());
         modelBounds.current.center = center;
         modelBounds.current.size = size;
 
-        object.position.sub(center); // Center the model
+        object.position.sub(center);
         const maxDim = Math.max(size.x, size.y, size.z, 0.0001);
-        const targetSize = 6; // Increased from 4 to make model larger by default
+        const targetSize = 6;
         const scale = Math.min(targetSize / maxDim, 10);
         object.scale.setScalar(scale);
-        object.position.set(2, 2, 0); // Offset to top-right (x: 2, y: 2)
+        object.position.set(2, 2, 0);
 
         console.log('Model bounds:', { center, size, scale, maxDim });
 
-        // Set camera to focus on top-right
-        initialCameraDistance.current = Math.max(maxDim * 1.5, 5); // Reduced distance for larger view
-        camera.position.set(3, maxDim + 2, initialCameraDistance.current); // Move camera up and right
-        camera.lookAt(2, 2, 0); // Look at the offset position
+        initialCameraDistance.current = Math.max(maxDim * 1.5, 5);
+        camera.position.set(3, maxDim + 2, initialCameraDistance.current);
+        camera.lookAt(2, 2, 0);
         camera.far = maxDim * 100;
         camera.updateProjectionMatrix();
 
-        // Add bounding box helper
         const boxHelper = new THREE.BoxHelper(object, 0xff0000);
         boxHelper.visible = showBoundingBox;
         scene.add(boxHelper);
 
+        if (modelObjectRef.current) scene.remove(modelObjectRef.current);
         modelObjectRef.current = object;
         scene.add(object);
         setIsLoading(false);
@@ -345,7 +322,6 @@ export default function ModelPreview({ model, onClose }) {
 
     loadModel();
 
-    // Event handlers
     const canvas = renderer.domElement;
     canvas.style.cursor = 'grab';
     canvas.style.touchAction = 'none';
@@ -359,7 +335,7 @@ export default function ModelPreview({ model, onClose }) {
       controlsRef.current.isPanning = e.shiftKey || e.button === 1;
       controlsRef.current.lastX = e.clientX;
       controlsRef.current.lastY = e.clientY;
-      controlsRef.current.autoRotate = false; // Stop auto-rotate on click
+      controlsRef.current.autoRotate = false;
       canvas.style.cursor = controlsRef.current.isPanning ? 'move' : 'grabbing';
       velocity = { x: 0, y: 0 };
     };
@@ -409,7 +385,7 @@ export default function ModelPreview({ model, onClose }) {
 
     const handleTouchStart = (e) => {
       e.preventDefault();
-      controlsRef.current.autoRotate = false; // Stop auto-rotate on touch
+      controlsRef.current.autoRotate = false;
       if (e.touches.length === 1) {
         controlsRef.current.isDragging = true;
         controlsRef.current.lastX = e.touches[0].clientX;
@@ -471,7 +447,6 @@ export default function ModelPreview({ model, onClose }) {
     canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
     canvas.addEventListener('contextmenu', handleContextMenu);
 
-    // Animation loop with damping
     const animate = () => {
       animationIdRef.current = requestAnimationFrame(animate);
       if (modelObjectRef.current) {
@@ -485,18 +460,17 @@ export default function ModelPreview({ model, onClose }) {
         }
 
         const targetPosition = new THREE.Vector3(
-          controlsRef.current.pan.x,
-          controlsRef.current.pan.y,
+          controlsRef.current.pan.x + 2,
+          controlsRef.current.pan.y + 2,
           initialCameraDistance.current / controlsRef.current.zoom
         );
         camera.position.lerp(targetPosition, controlsRef.current.dampingFactor);
-        camera.lookAt(2, 2, 0); // Maintain look-at on top-right offset
+        camera.lookAt(2, 2, 0);
         renderer.render(scene, camera);
       }
     };
     animate();
 
-    // Resize handler
     const handleResize = () => {
       if (!mountRef.current || !rendererRef.current || !cameraRef.current) return;
       const width = isFullscreen ? window.innerWidth : mountRef.current.clientWidth;
@@ -508,7 +482,6 @@ export default function ModelPreview({ model, onClose }) {
     };
     window.addEventListener('resize', handleResize);
 
-    // Cleanup
     return () => {
       window.removeEventListener('resize', handleResize);
       canvas.removeEventListener('mousedown', handleMouseDown);
@@ -534,7 +507,6 @@ export default function ModelPreview({ model, onClose }) {
     };
   }, [model, isFullscreen, reloadKey, showBoundingBox, setupLighting]);
 
-  // Control functions
   const enterFullscreen = () => fullscreenRef.current?.requestFullscreen?.();
   const exitFullscreen = () => document.exitFullscreen?.();
   const toggleFullscreen = useCallback(() => (isFullscreen ? exitFullscreen() : enterFullscreen()), [isFullscreen]);
@@ -563,7 +535,7 @@ export default function ModelPreview({ model, onClose }) {
     setError(null);
     setRetryCount(0);
     setReloadKey(prev => prev + 1);
-    controlsRef.current.autoRotate = true; // Re-enable auto-rotate on reload
+    controlsRef.current.autoRotate = true;
   }, [resetView]);
 
   if (!model || !model.fileUrl || !model.objFilename) {
@@ -590,7 +562,6 @@ export default function ModelPreview({ model, onClose }) {
       className={`fixed inset-0 z-50 ${isFullscreen ? 'bg-black' : 'bg-black/80 flex items-center justify-center p-1 sm:p-2'}`}
     >
       <div className={`${isFullscreen ? 'w-full h-full' : 'relative bg-white shadow-2xl w-full max-w-7xl h-[85vh] sm:h-[90vh] rounded-xl overflow-hidden'}`}>
-        {/* Header */}
         <div className={`${isFullscreen ? 'absolute top-0 left-0 right-0 z-10 bg-black/70 backdrop-blur-sm' : 'bg-gradient-to-r from-gray-50 to-gray-100 rounded-t-xl border-b'} p-2 sm:p-4`}>
           <div className="flex items-center justify-between flex-col sm:flex-row gap-2 sm:gap-0">
             <div className="flex items-center justify-center sm:justify-start w-full sm:w-auto">
@@ -608,7 +579,7 @@ export default function ModelPreview({ model, onClose }) {
             <div className="flex items-center justify-center sm:justify-end flex-wrap gap-1 sm:gap-2">
               <button
                 onClick={reloadModel}
-                title="Reload Model"
+                title="Reload Model (R)"
                 className="p-1.5 sm:p-2 rounded-lg bg-green-500 text-white hover:bg-green-600 transition-all text-xs sm:text-sm"
               >
                 <RefreshCw size={16} className="sm:w-5 sm:h-5" />
@@ -675,7 +646,6 @@ export default function ModelPreview({ model, onClose }) {
           </div>
         </div>
 
-        {/* 3D Viewer */}
         <div className={`relative ${isFullscreen ? 'w-full h-full' : 'w-full h-[calc(100%-56px)] sm:h-[calc(100%-80px)] rounded-xl overflow-hidden'}`}>
           {isLoading && (
             <div className="absolute inset-0 flex items-center justify-center bg-gray-100 z-20">
@@ -704,7 +674,7 @@ export default function ModelPreview({ model, onClose }) {
               </div>
             </div>
           )}
-          <div ref={mountRef} className="w-full h-full bg-[#f8f9fa]" /> {/* Match scene background */}
+          <div ref={mountRef} className="w-full h-full bg-[#f8f9fa]" />
           <div className="absolute bottom-2 sm:bottom-4 left-2 sm:left-4 bg-black/70 text-white p-1 sm:p-2 rounded-lg text-xs sm:text-sm hidden md:block">
             <p>• Drag to rotate (stops auto-rotation)</p>
             <p>• Shift + Drag or Middle Click to pan</p>

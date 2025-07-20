@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
@@ -17,32 +16,48 @@ const PORT = process.env.PORT || 3001;
 const { cleanupTempFolders } = require("./utils/cleanUp.js");
 cleanupTempFolders();
 
-// --- middleware ---
+// Middleware
 app.use(helmet());
-app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500 }));
+app.use(
+  rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 1000,
+    message: "Too many requests, please try again later.",
+  })
+);
+
+// Status endpoint rate limit
+const statusRateLimit = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 30,
+  message: "Too many status requests, please wait and try again.",
+});
+
+// Long-term status rate limit
+const longTermStatusRateLimit = rateLimit({
+  windowMs: 1000 * 1000, // ~16.67 minutes
+  max: 500,
+  message: "Reached maximum request limit (500), please wait and try again.",
+});
+
 app.use(
   cors({
     origin: ["http://localhost:5173", "http://localhost:3000"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
   })
 );
 app.use(express.json());
 
-// Serve model files
-app.use(
-  "/models/import",
-  express.static(path.join(__dirname, "models", "import"))
-);
-app.use(
-  "/models/open3d",
-  express.static(path.join(__dirname, "models", "open3d"))
-);
-app.use(
-  "/models/meshroom",
-  express.static(path.join(__dirname, "models", "meshroom"))
-);
+// Serve static files for all processors
+const ROOT_MODELS = path.join(__dirname, "models");
+["open3d", "meshroom", "import"].forEach((proc) => {
+  app.use(`/models/${proc}`, express.static(path.join(ROOT_MODELS, proc)));
+});
+app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
 
-// --- multer config ---
+// Multer config
 const storage = multer.diskStorage({
   destination: (_, __, cb) => cb(null, path.join(__dirname, "Uploads")),
   filename: (_, file, cb) =>
@@ -51,7 +66,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits: { fileSize: 200 * 1024 * 1024 },
   fileFilter: (_, file, cb) =>
     cb(
       null,
@@ -60,44 +75,54 @@ const upload = multer({
     ),
 });
 
-// --- model paths ---
-const ROOT_MODELS = path.join(__dirname, "models");
+// Model paths
 fs.ensureDirSync(ROOT_MODELS);
-["meshroom", "open3d", "import"].forEach((dir) =>
+["open3d", "meshroom", "import"].forEach((dir) =>
   fs.ensureDirSync(path.join(ROOT_MODELS, dir))
 );
 
-// --- in-memory state ---
+// In-memory state
 const modelStatus = new Map();
 
-// --- helper: recursive file listing ---
+// Helper: Recursive file listing
 async function listFiles(dir) {
   const files = [];
-  await walk(dir, "");
-  return files;
-
   async function walk(curr, rel) {
-    for (const item of await fs.readdir(curr, { withFileTypes: true })) {
+    const items = await fs.readdir(curr, { withFileTypes: true });
+    for (const item of items) {
       const abs = path.join(curr, item.name);
       const relPath = path.join(rel, item.name);
       if (item.isDirectory()) await walk(abs, relPath);
       else
         files.push({
-          name: item.name,
+          filename: item.name,
           path: relPath,
           size: (await fs.stat(abs)).size,
-          downloadUrl: `/api/models/${path.basename(
+          downloadUrl: `/models/${path.basename(
             path.dirname(curr)
-          )}/download/${item.name}`,
+          )}/${path.basename(path.dirname(abs))}/${item.name}`,
           extension: path.extname(item.name).slice(1).toLowerCase(),
         });
     }
   }
+  await walk(dir, "");
+  return files;
 }
 
-// --- API routes ---
+// Helper: Safe file reading
+async function readFile(filePath) {
+  try {
+    const data = await fs.readFile(filePath, "utf8");
+    return JSON.parse(data);
+  } catch (error) {
+    console.error(`Error reading ${filePath}: ${error.message}`);
+    return null;
+  }
+}
 
-// Upload route: Handles image processing + OBJ/MTL import
+// API Routes
+
+// Upload route
 app.post(
   "/api/upload",
   upload.fields([
@@ -108,51 +133,50 @@ app.post(
   async (req, res) => {
     try {
       const id = uuidv4();
-      const name = req.body.modelName || `Model_${Date.now()}`;
-      const processor = req.body.processor || "meshroom";
+      const modelName = req.body.modelName || `Model_${id}`;
+      const processor = req.body.processor || "open3d";
+      if (!["open3d", "meshroom", "import"].includes(processor)) {
+        return res.status(400).json({ error: "Invalid processor specified" });
+      }
+
       const images = (req.files.images || []).map((f) =>
         path.join(__dirname, "Uploads", f.filename).replace(/\\/g, "/")
       );
       const obj = req.files.obj
-        ? [
-            path
-              .join(__dirname, "Uploads", req.files.obj[0].filename)
-              .replace(/\\/g, "/"),
-          ]
-        : [];
+        ? path
+            .join(__dirname, "Uploads", req.files.obj[0].filename)
+            .replace(/\\/g, "/")
+        : null;
       const mtl = req.files.mtl
-        ? [
-            path
-              .join(__dirname, "Uploads", req.files.mtl[0].filename)
-              .replace(/\\/g, "/"),
-          ]
-        : [];
+        ? path
+            .join(__dirname, "Uploads", req.files.mtl[0].filename)
+            .replace(/\\/g, "/")
+        : null;
 
-      // Updated validation: Allow at least 2 images or at least 1 OBJ (MTL optional)
-      if (images.length < 2 && obj.length === 0) {
+      if (images.length < 2 && !obj) {
         return res
           .status(400)
           .json({ error: "Need ≥2 images or at least one OBJ file" });
       }
 
-      // Handle OBJ/MTL import
-      if (obj.length > 0 && images.length === 0) {
-        const modelDir = path.join(ROOT_MODELS, "import", id);
-        await fs.ensureDir(modelDir);
-        const objDest = path.join(modelDir, name + ".obj");
-        await fs.copy(obj[0], objDest);
+      const modelDir = path.join(ROOT_MODELS, processor, id);
+      await fs.ensureDir(modelDir);
 
-        const objFiles = [{ filename: name + ".obj" }];
-        if (mtl.length > 0) {
-          const mtlDest = path.join(modelDir, name + ".mtl");
-          await fs.copy(mtl[0], mtlDest);
-          objFiles.push({ filename: name + ".mtl" });
+      if (processor === "import") {
+        if (!obj) throw new Error("No OBJ file provided for import");
+        const objDest = path.join(modelDir, `${modelName}.obj`);
+        await fs.copy(obj, objDest);
+        const objFiles = [{ filename: `${modelName}.obj`, type: "mesh" }];
+        if (mtl) {
+          const mtlDest = path.join(modelDir, `${modelName}.mtl`);
+          await fs.copy(mtl, mtlDest);
+          objFiles.push({ filename: `${modelName}.mtl`, type: "material" });
         }
 
         const status = {
           id,
-          name,
-          processor: "import",
+          name: modelName,
+          processor,
           status: "completed",
           progress: 100,
           createdAt: Date.now(),
@@ -166,13 +190,9 @@ app.post(
         return res.json({ modelId: id });
       }
 
-      // Handle image-based processing
-      const modelDir = path.join(ROOT_MODELS, processor, id);
-      await fs.ensureDir(modelDir);
-
       const status = {
         id,
-        name,
+        name: modelName,
         processor,
         status: "queued",
         progress: 0,
@@ -189,7 +209,6 @@ app.post(
         processor === "open3d"
           ? "open3d_processor.py"
           : "meshroom_processor.py";
-
       const py = spawn(
         "python",
         [
@@ -197,7 +216,7 @@ app.post(
           "--project-id",
           id,
           "--model-name",
-          name,
+          modelName,
           "--images",
           JSON.stringify(images),
           "--output-dir",
@@ -211,23 +230,46 @@ app.post(
         if (line.startsWith("{")) {
           try {
             const upd = JSON.parse(line);
-            const s = { ...modelStatus.get(id), ...upd, updatedAt: Date.now() };
+            const currentStatus = modelStatus.get(id) || status;
+            const s = {
+              ...currentStatus,
+              ...upd,
+              updatedAt: Date.now(),
+              processor,
+            };
             modelStatus.set(id, s);
-            fs.writeJson(path.join(modelDir, "status.json"), s).catch(() => {});
-          } catch {}
+            fs.writeJson(path.join(modelDir, "status.json"), s).catch((err) => {
+              console.error(
+                `Failed to write status.json for ${id}: ${err.message}`
+              );
+            });
+          } catch (err) {
+            console.error(
+              `Failed to parse status update for ${id}: ${err.message}`
+            );
+          }
         }
       });
 
       py.stderr.on("data", (d) => console.error("[Py]", d.toString()));
       py.on("close", (code) => {
-        const s = modelStatus.get(id);
+        const s = modelStatus.get(id) || status;
         if (code !== 0 && s.status !== "failed") {
           modelStatus.set(id, {
             ...s,
             status: "failed",
-            error: "Python crashed",
+            error: "Python process exited with error",
+            updatedAt: Date.now(),
+            processor,
           });
-          fs.writeJson(path.join(modelDir, "status.json"), modelStatus.get(id));
+          fs.writeJson(
+            path.join(modelDir, "status.json"),
+            modelStatus.get(id)
+          ).catch((err) => {
+            console.error(
+              `Failed to update status.json on close for ${id}: ${err.message}`
+            );
+          });
         }
       });
 
@@ -239,79 +281,97 @@ app.post(
   }
 );
 
-// Get model status
-app.get("/api/models/:modelId/status", (req, res) => {
-  const s = modelStatus.get(req.params.modelId);
-  if (!s) return res.status(404).json({ error: "Model not found" });
-  res.json(s);
-});
+// Model status
+app.get(
+  "/api/models/:modelId/status",
+  longTermStatusRateLimit,
+  statusRateLimit,
+  async (req, res) => {
+    const modelId = req.params.modelId;
+    const status = modelStatus.get(modelId);
+    if (!status) {
+      const processors = ["open3d", "meshroom", "import"];
+      for (const proc of processors) {
+        const statusPath = path.join(ROOT_MODELS, proc, modelId, "status.json");
+        if (await fs.pathExists(statusPath)) {
+          const data = await readFile(statusPath);
+          if (data) {
+            modelStatus.set(modelId, data);
+            return res.json(data);
+          }
+        }
+      }
+      return res.status(404).json({ error: "Model not found" });
+    }
+    res.json(status);
+  }
+);
 
-// Get full model info
+// Model info
 app.get("/api/models/:modelId", async (req, res) => {
-  const proc = modelStatus.get(req.params.modelId)?.processor;
-  const dir = path.join(ROOT_MODELS, proc || "meshroom", req.params.modelId);
-  const statFile = path.join(dir, "status.json");
-  if (!(await fs.pathExists(statFile)))
-    return res.status(404).json({ error: "Model not found" });
-  res.json(await fs.readJson(statFile));
+  const modelId = req.params.modelId;
+  const processors = ["open3d", "meshroom", "import"];
+  for (const proc of processors) {
+    const statusPath = path.join(ROOT_MODELS, proc, modelId, "status.json");
+    if (await fs.pathExists(statusPath)) {
+      const status = await readFile(statusPath);
+      if (!status)
+        return res.status(500).json({ error: "Invalid status file" });
+      return res.json(status);
+    }
+  }
+  res.status(404).json({ error: "Model not found" });
 });
 
 // List model files
 app.get("/api/models/:modelId/files", async (req, res) => {
-  const proc = modelStatus.get(req.params.modelId)?.processor;
-  const dir = path.join(ROOT_MODELS, proc || "meshroom", req.params.modelId);
-  if (!(await fs.pathExists(dir)))
-    return res.status(404).json({ error: "Model not found" });
-  res.json({ files: await listFiles(dir) });
-});
-
-// Download a single file
-app.get("/api/models/:modelId/download/:filename", async (req, res) => {
-  const proc = modelStatus.get(req.params.modelId)?.processor;
-  const file = path.join(
-    ROOT_MODELS,
-    proc || "meshroom",
-    req.params.modelId,
-    req.params.filename
-  );
-  if (!(await fs.pathExists(file)))
-    return res.status(404).json({ error: "File not found" });
-  res.setHeader(
-    "Content-Disposition",
-    `attachment; filename=${req.params.filename}`
-  );
-  res.sendFile(file);
-});
-
-app.get("/api/models/:modelId/download-all", async (req, res) => {
   const modelId = req.params.modelId;
-
-  // Try to get processor from status, otherwise try all processors
-  const status = modelStatus.get(modelId);
-  const processors = status
-    ? [status.processor]
-    : ["meshroom", "open3d", "import"];
-
-  let foundDir = null;
+  const processors = ["open3d", "meshroom", "import"];
   for (const proc of processors) {
     const dir = path.join(ROOT_MODELS, proc, modelId);
     if (await fs.pathExists(dir)) {
-      foundDir = dir;
+      return res.json({ files: await listFiles(dir) });
+    }
+  }
+  res.status(404).json({ error: "Model not found" });
+});
+
+// Download single file
+app.get("/api/models/:modelId/download/:filename", async (req, res) => {
+  const { modelId, filename } = req.params;
+  const processors = ["open3d", "meshroom", "import"];
+  for (const proc of processors) {
+    const file = path.join(ROOT_MODELS, proc, modelId, filename);
+    if (await fs.pathExists(file)) {
+      res.setHeader("Content-Disposition", `attachment; filename=${filename}`);
+      return res.sendFile(file);
+    }
+  }
+  res.status(404).json({ error: "File not found" });
+});
+
+// Download all model files as ZIP
+app.get("/api/models/:modelId/download-all", async (req, res) => {
+  const modelId = req.params.modelId;
+  const processors = ["open3d", "meshroom", "import"];
+  let modelDir = null;
+  for (const proc of processors) {
+    const dir = path.join(ROOT_MODELS, proc, modelId);
+    if (await fs.pathExists(dir)) {
+      modelDir = dir;
       break;
     }
   }
 
-  if (!foundDir) {
-    return res
-      .status(404)
-      .json({ error: "Model directory not found in any processor folder" });
+  if (!modelDir) {
+    return res.status(404).json({ error: "Model directory not found" });
   }
 
   res.setHeader("Content-Type", "application/zip");
   res.setHeader("Content-Disposition", `attachment; filename=${modelId}.zip`);
   const archive = archiver("zip");
   archive.pipe(res);
-  archive.directory(foundDir, false);
+  archive.directory(modelDir, false);
   archive.finalize();
 });
 
@@ -319,41 +379,51 @@ app.get("/api/models/:modelId/download-all", async (req, res) => {
 app.get("/api/models", async (req, res) => {
   try {
     const result = [];
-    const processors = ["meshroom", "open3d", "import"];
+    const processors = ["open3d", "meshroom", "import"];
     for (const proc of processors) {
       const baseDir = path.join(ROOT_MODELS, proc);
-      const modelIds = await fs.readdir(baseDir);
-      for (const id of modelIds) {
+      const modelIds = await fs.readdir(baseDir, { withFileTypes: true });
+      for (const dirent of modelIds) {
+        if (!dirent.isDirectory()) continue;
+        const id = dirent.name;
         const statusPath = path.join(baseDir, id, "status.json");
         if (await fs.pathExists(statusPath)) {
-          const json = await fs.readJson(statusPath);
-          result.push(json);
+          const json = await readFile(statusPath);
+          if (json) {
+            if (!json.createdAt) json.createdAt = Date.now();
+            result.push(json);
+          }
         }
       }
     }
-    result.sort((a, b) => b.createdAt - a.createdAt);
+    result.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
     res.json(result);
   } catch (err) {
-    res.status(500).json({ error: "Failed to fetch models" });
+    console.error("Error in /api/models:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to fetch models", details: err.message });
   }
 });
 
 // Delete model
 app.delete("/api/models/:modelId", async (req, res) => {
   try {
-    const id = req.params.modelId;
-    const match = await Promise.any(
-      ["meshroom", "open3d", "import"].map(async (processor) => {
-        const modelPath = path.join(ROOT_MODELS, processor, id);
-        if (await fs.pathExists(modelPath)) return modelPath;
-        throw new Error("Not found");
-      })
-    ).catch(() => null);
+    const modelId = req.params.modelId;
+    const processors = ["open3d", "meshroom", "import"];
+    let modelPath = null;
+    for (const proc of processors) {
+      const dir = path.join(ROOT_MODELS, proc, modelId);
+      if (await fs.pathExists(dir)) {
+        modelPath = dir;
+        break;
+      }
+    }
 
-    if (!match) return res.status(404).json({ error: "Model not found" });
+    if (!modelPath) return res.status(404).json({ error: "Model not found" });
 
-    await fs.remove(match);
-    modelStatus.delete(id);
+    await fs.remove(modelPath);
+    modelStatus.delete(modelId);
     res.json({ success: true });
   } catch (err) {
     console.error("Delete error:", err);
@@ -363,9 +433,6 @@ app.delete("/api/models/:modelId", async (req, res) => {
 
 // Health check
 app.get("/api/health", (_, res) => res.json({ status: "ok" }));
-
-// Serve uploads
-app.use("/uploads", express.static(path.join(__dirname, "Uploads")));
 
 // Start server
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));

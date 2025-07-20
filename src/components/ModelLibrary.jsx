@@ -14,44 +14,43 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
   const [showFullPreview, setShowFullPreview] = useState(false);
   const [downloadingModels, setDownloadingModels] = useState(new Set());
 
-  // Get model base folder URL - returns directory path only
   const getModelBaseUrl = (model) => {
     if (!model || !model.id || !model.processor) return null;
-    return `http://localhost:3001/models/${model.processor}/${model.id}`;
+    return `/models/${model.processor}/${model.id}`; // Relative path for proxy
   };
 
-  // Get model file details
   const getModelFileDetails = (model) => {
     let objFilename = null;
     let mtlFilename = null;
 
-    if (model.objFiles && model.objFiles.length > 0) {
-      // Prefer objFiles from status.json
-      objFilename = model.objFiles.find(f => f.filename.endsWith('.obj'))?.filename || `${model.name}.obj`;
-      mtlFilename = model.objFiles.find(f => f.filename.endsWith('.mtl'))?.filename || `${model.name}.mtl`;
-    } else if (model.processor === "open3d" || model.processor === "meshroom") {
-      objFilename = "texturedMesh.obj";
-      mtlFilename = "texturedMesh.mtl";
-    } else {
-      objFilename = model.fileName || `${model.name}.obj`;
-      mtlFilename = `${model.name}.mtl`;
+    if (model.objFiles && Array.isArray(model.objFiles) && model.objFiles.length > 0) {
+      objFilename = model.objFiles.find(f => f.filename?.endsWith('.obj'))?.filename;
+      mtlFilename = model.objFiles.find(f => f.filename?.endsWith('.mtl'))?.filename;
+    }
+
+    if (!objFilename) {
+      objFilename = `${model.name || 'Model'}.obj`; // Use model.name without timestamp
+    }
+    if (!mtlFilename) {
+      mtlFilename = `${model.name || 'Model'}.mtl`; // Use model.name without timestamp
     }
 
     return { objFilename, mtlFilename };
   };
 
-  const filtered = savedModels
-    .filter(m =>
-      m.name.toLowerCase().includes(searchTerm.toLowerCase()) &&
-      (filterBy === 'all' || m.processor === filterBy)
-    )
+  const filtered = (savedModels || [])
+    .filter(m => {
+      const name = m.name || '';
+      const processor = m.processor || '';
+      return name.toLowerCase().includes(searchTerm.toLowerCase()) &&
+             (filterBy === 'all' || processor === filterBy);
+    })
     .sort((a, b) => {
-      if (sortBy === 'newest') return new Date(b.createdAt) - new Date(a.createdAt);
-      if (sortBy === 'oldest') return new Date(a.createdAt) - new Date(b.createdAt);
-      return a.name.localeCompare(b.name);
+      if (sortBy === 'newest') return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+      if (sortBy === 'oldest') return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
+      return (a.name || '').localeCompare(b.name || '');
     });
 
-  // Get processor badge color
   const getProcessorBadgeColor = (processor) => {
     switch (processor) {
       case 'meshroom':
@@ -65,7 +64,6 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
     }
   };
 
-  // Download single model as ZIP
   const downloadModel = async (model) => {
     try {
       const modelId = model.id;
@@ -73,7 +71,7 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
       
       console.log('Attempting download for model ID:', modelId, 'Model data:', model);
       
-      const response = await fetch(`http://localhost:3001/api/models/${modelId}/download-all`, {
+      const response = await fetch(`/api/models/${modelId}/download-all`, {
         method: 'GET',
         headers: {
           'Accept': 'application/zip',
@@ -107,7 +105,6 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
     }
   };
 
-  // Download multiple models as individual ZIPs
   const downloadSelectedModels = async () => {
     const modelsToDownload = filtered.filter(m => selectedModels.includes(m.id));
     
@@ -116,15 +113,8 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
       return;
     }
 
-    if (modelsToDownload.length === 1) {
-      await downloadModel(modelsToDownload[0]);
-      return;
-    }
-
-    // Download multiple models sequentially to avoid overwhelming the server
     for (const model of modelsToDownload) {
       await downloadModel(model);
-      // Small delay between downloads
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   };
@@ -132,7 +122,7 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
   const deleteModels = async (ids) => {
     try {
       for (const id of ids) {
-        await fetch(`http://localhost:3001/api/models/${id}`, { method: 'DELETE' });
+        await fetch(`/api/models/${id}`, { method: 'DELETE' });
       }
       setSavedModels(prev => prev.filter(m => !ids.includes(m.id)));
       setSelectedModels([]);
@@ -147,7 +137,6 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
       prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
     );
 
-  // Select all function
   const selectAll = () => {
     if (selectedModels.length === filtered.length) {
       setSelectedModels([]);
@@ -156,15 +145,20 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
     }
   };
 
-  // Preview function with proper filename handling
   const handlePreview = (model) => {
     const baseUrl = getModelBaseUrl(model);
     if (!baseUrl) {
-      console.error('Cannot generate base URL for model:', model);
+      console.error('Invalid model data - missing id or processor:', model);
+      alert('Cannot preview: Model data is incomplete.');
       return;
     }
 
     const { objFilename, mtlFilename } = getModelFileDetails(model);
+    if (!objFilename) {
+      console.error('No OBJ filename available for model:', model);
+      alert('Cannot preview: Required OBJ file is missing.');
+      return;
+    }
 
     const previewModelData = {
       ...model,
@@ -172,13 +166,15 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
       objFilename,
       mtlFilename,
       name: model.name || 'Untitled Model',
-      id: model.id,
-      processor: model.processor || 'import'
+      id: model.id || '',
+      processor: model.processor || 'import',
+      objFiles: [
+        { filename: objFilename },
+        ...(mtlFilename ? [{ filename: mtlFilename }] : [])
+      ]
     };
 
     console.log('Preview model data:', previewModelData);
-    console.log('OBJ URL:', `${baseUrl}/${objFilename}`);
-    console.log('MTL URL:', `${baseUrl}/${mtlFilename}`);
     setPreviewModel(previewModelData);
     setShowFullPreview(true);
   };
@@ -186,7 +182,6 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
   return (
     <div className="w-full max-w-none mx-auto">
       <div className="bg-white rounded-2xl shadow-xl border border-gray-100">
-        {/* Header */}
         <div className="border-b border-gray-200 px-8 py-6">
           <div className="flex items-center justify-between">
             <div>
@@ -206,7 +201,6 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
           </div>
         </div>
 
-        {/* Controls */}
         <div className="px-8 pt-6">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
             <div className="relative flex-1">
@@ -242,7 +236,6 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
             </div>
           </div>
 
-          {/* Select All and Bulk Actions */}
           {selectedModels.length > 0 && (
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center space-x-4">
@@ -258,12 +251,10 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
                   />
                   <span>Select All ({filtered.length})</span>
                 </button>
-                
                 <span className="text-sm text-gray-600">
                   {selectedModels.length} of {filtered.length} selected
                 </span>
               </div>
-
               <div className="flex items-center space-x-2">
                 <button
                   onClick={downloadSelectedModels}
@@ -273,7 +264,6 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
                   <Archive className="w-4 h-4" />
                   <span>Download Selected ({selectedModels.length})</span>
                 </button>
-                
                 <button
                   onClick={() => deleteModels(selectedModels)}
                   className="flex items-center space-x-2 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition"
@@ -285,7 +275,6 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
             </div>
           )}
 
-          {/* Grid Cards */}
           {filtered.length === 0 ? (
             <div className="text-center py-16">
               <Folder className="w-16 h-16 text-gray-400 mx-auto mb-4" />
@@ -312,17 +301,15 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
                         onChange={() => toggleSelect(m.id)}
                         className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                       />
-                      <h3 className="font-semibold truncate text-gray-900">{m.name}</h3>
+                      <h3 className="font-semibold truncate text-gray-900">{m.name || 'Untitled Model'}</h3>
                     </div>
-                    <span className={`text-xs px-2 py-1 rounded font-medium ${getProcessorBadgeColor(m.processor)}`}>
-                      {m.processor}
+                    <span className={`text-xs px-2 py-1 rounded font-medium ${getProcessorBadgeColor(m.processor || 'unknown')}`}>
+                      {m.processor || 'Unknown'}
                     </span>
                   </div>
-                  
                   <div className="text-gray-500 text-xs mb-4">
-                    Created: {new Date(m.createdAt).toLocaleDateString()}
+                    Created: {new Date(m.createdAt || 0).toLocaleDateString()}
                   </div>
-                  
                   <div className="flex space-x-2">
                     <button
                       onClick={() => downloadModel(m)}
@@ -356,7 +343,6 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
         </div>
       </div>
 
-      {/* Full Preview Modal */}
       {showFullPreview && previewModel && (
         <EnhancedModelPreviewModal
           model={previewModel}
