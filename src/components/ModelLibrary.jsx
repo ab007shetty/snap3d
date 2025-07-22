@@ -182,26 +182,26 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
   return (
     <div className="w-full max-w-none mx-auto">
       <div className="bg-white rounded-2xl shadow-xl border border-gray-100">
-        <div className="border-b border-gray-200 px-8 py-6">
+        <div className="border-b border-gray-200 px-4 sm:px-8 py-6">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-3xl font-bold text-gray-900 mb-2">
+              <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-2">
                 Model Library
               </h1>
-              <p className="text-gray-600">
+              <p className="text-gray-600 text-sm sm:text-base">
                 Browse, preview and manage your saved 3D models
               </p>
             </div>
             <div className="flex items-center space-x-2">
               <div className="flex items-center space-x-1">
                 <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                <span className="text-sm text-gray-600">Library View</span>
+                <span className="text-sm text-gray-600 hidden sm:inline">Library View</span>
               </div>
             </div>
           </div>
         </div>
 
-        <div className="px-8 pt-6">
+        <div className="px-4 sm:px-8 pt-6">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-5 h-5" />
@@ -213,7 +213,7 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
                 className="w-full pl-10 pr-4 py-3 border rounded-lg focus:ring-indigo-500"
               />
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-col sm:flex-row gap-2">
               <select
                 className="px-4 py-3 border rounded-lg focus:ring-indigo-500"
                 value={filterBy}
@@ -237,11 +237,11 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
           </div>
 
           {selectedModels.length > 0 && (
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center space-x-4">
+            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4 p-4 bg-gray-50 rounded-lg">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
                 <button
                   onClick={selectAll}
-                  className="flex items-center space-x-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition"
+                  className="flex items-center justify-center sm:justify-start space-x-2 px-4 py-2 bg-white text-gray-700 rounded-lg hover:bg-gray-100 transition border border-gray-200 min-h-[42px]"
                 >
                   <input
                     type="checkbox"
@@ -249,27 +249,27 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
                     onChange={selectAll}
                     className="w-4 h-4"
                   />
-                  <span>Select All ({filtered.length})</span>
+                  <span className="text-sm sm:text-base">Select All ({filtered.length})</span>
                 </button>
-                <span className="text-sm text-gray-600">
+                <div className="text-sm text-gray-600 text-center sm:text-left">
                   {selectedModels.length} of {filtered.length} selected
-                </span>
+                </div>
               </div>
-              <div className="flex items-center space-x-2">
+              <div className="flex flex-col sm:flex-row gap-2 sm:gap-2">
                 <button
                   onClick={downloadSelectedModels}
                   disabled={selectedModels.length === 0}
-                  className="flex items-center space-x-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex items-center justify-center space-x-2 bg-green-600 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-green-700 transition disabled:opacity-50 disabled:cursor-not-allowed text-sm sm:text-base min-h-[42px]"
                 >
-                  <Archive className="w-4 h-4" />
-                  <span>Download Selected ({selectedModels.length})</span>
+                  <Archive className="w-4 h-4 flex-shrink-0" />
+                  <span className="truncate">Download ({selectedModels.length})</span>
                 </button>
                 <button
                   onClick={() => deleteModels(selectedModels)}
-                  className="flex items-center space-x-2 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition"
+                  className="flex items-center justify-center space-x-2 bg-red-600 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-red-700 transition text-sm sm:text-base min-h-[42px]"
                 >
-                  <Trash2 className="w-4 h-4" />
-                  <span>Delete Selected ({selectedModels.length})</span>
+                  <Trash2 className="w-4 h-4 flex-shrink-0" />
+                  <span className="truncate">Delete ({selectedModels.length})</span>
                 </button>
               </div>
             </div>
@@ -283,7 +283,7 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
               </p>
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 pb-8">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 pb-8">
               {filtered.map(m => (
                 <div
                   key={m.id}
@@ -294,46 +294,46 @@ export default function ModelLibrary({ savedModels, setSavedModels }) {
                   }`}
                 >
                   <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center space-x-2">
+                    <div className="flex items-center space-x-2 min-w-0 flex-1">
                       <input
                         type="checkbox"
                         checked={selectedModels.includes(m.id)}
                         onChange={() => toggleSelect(m.id)}
-                        className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                        className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500 flex-shrink-0"
                       />
-                      <h3 className="font-semibold truncate text-gray-900">{m.name || 'Untitled Model'}</h3>
+                      <h3 className="font-semibold truncate text-gray-900 text-sm sm:text-base">{m.name || 'Untitled Model'}</h3>
                     </div>
-                    <span className={`text-xs px-2 py-1 rounded font-medium ${getProcessorBadgeColor(m.processor || 'unknown')}`}>
+                    <span className={`text-xs px-2 py-1 rounded font-medium flex-shrink-0 ml-2 ${getProcessorBadgeColor(m.processor || 'unknown')}`}>
                       {m.processor || 'Unknown'}
                     </span>
                   </div>
                   <div className="text-gray-500 text-xs mb-4">
                     Created: {new Date(m.createdAt || 0).toLocaleDateString()}
                   </div>
-                  <div className="flex space-x-2">
+                  <div className="flex flex-col sm:flex-row gap-2">
                     <button
                       onClick={() => downloadModel(m)}
                       disabled={downloadingModels.has(m.id)}
-                      className="flex-1 flex items-center justify-center space-x-1 bg-indigo-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="flex-1 flex items-center justify-center space-x-1 bg-indigo-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed min-h-[36px]"
                     >
                       {downloadingModels.has(m.id) ? (
                         <>
-                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
-                          <span>Downloading...</span>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white flex-shrink-0"></div>
+                          <span className="truncate">Downloading...</span>
                         </>
                       ) : (
                         <>
-                          <Archive className="w-4 h-4" />
-                          <span>Download ZIP</span>
+                          <Archive className="w-4 h-4 flex-shrink-0" />
+                          <span className="truncate">Download ZIP</span>
                         </>
                       )}
                     </button>
                     <button
                       onClick={() => handlePreview(m)}
-                      className="flex-1 flex items-center justify-center space-x-1 bg-gray-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-gray-700 transition"
+                      className="flex-1 flex items-center justify-center space-x-1 bg-gray-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-gray-700 transition min-h-[36px]"
                     >
-                      <Eye className="w-4 h-4" />
-                      <span>Preview</span>
+                      <Eye className="w-4 h-4 flex-shrink-0" />
+                      <span className="truncate">Preview</span>
                     </button>
                   </div>
                 </div>

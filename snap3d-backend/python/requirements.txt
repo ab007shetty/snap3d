@@ -16,3 +16,4 @@ timm==0.9.16
 matplotlib==3.7.2
 filelock==3.13.1
 nksr
+exifread==3.3.2

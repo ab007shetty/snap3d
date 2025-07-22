@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Enhanced Meshroom head-less 3-D reconstruction worker
-- Improved error handling and logging
-- Better file management and validation
-- Support for individual image files
-- Enhanced pipeline configuration
+- Uses simple input/output execution strategy
+- Strict image validation for Meshroom compatibility
+- Detailed error handling and logging
+- Ensures OBJ and MTL output files
 """
 
 from __future__ import annotations
@@ -18,93 +18,181 @@ import subprocess
 import sys
 import tempfile
 import time
+import re
 from typing import List, Optional, Dict, Any
+from PIL import Image
+import exifread
+import logging
 
-# --------------------------------------------------------------------------- #
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stderr),
+        logging.FileHandler('meshroom_processor.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
 MESHROOM_POSSIBLE_PATHS = [
     r"C:\Program Files\Meshroom\meshroom_batch.exe",
     r"C:\Program Files\Meshroom\Meshroom.exe",
-    r"C:\Program Files\Meshroom-2023.3.0\meshroom_batch.exe",
-    r"C:\Program Files\Meshroom-2023.3.0\Meshroom.exe",
-    "meshroom_batch",
-    "Meshroom",
 ]
 
-# Supported image formats
 SUPPORTED_FORMATS = {'.jpg', '.jpeg', '.png', '.tiff', '.tif', '.bmp', '.exr', '.hdr'}
 
-def update_status(status: str, progress: int, error: str | None = None) -> None:
-    """Update processing status with JSON output"""
-    payload = {"status": status, "progress": progress}
+def update_status(status: str, progress: int, error: str = None, output_dir: str = None, 
+                 project_id: str = None, model_name: str = None, 
+                 images: List[str] = None, created_at: int = None,
+                 obj_files: List[Dict[str, str]] = None) -> None:
+    """Update status with complete project information"""
+    payload = {
+        "status": status, 
+        "progress": progress, 
+        "updatedAt": int(time.time() * 1000)
+    }
+    if project_id:
+        payload["id"] = project_id
+    if model_name:
+        payload["name"] = model_name
+        payload["processor"] = "meshroom"
+    if created_at:
+        payload["createdAt"] = created_at
+    if images:
+        payload["images"] = [{"filename": pathlib.Path(img).name} for img in images]
+    if obj_files:
+        payload["objFiles"] = obj_files
+    else:
+        payload["objFiles"] = []
     if error:
         payload["error"] = error
-    print(json.dumps(payload), flush=True)
-
-def log_message(message: str, level: str = "INFO") -> None:
-    """Log messages to stderr for debugging"""
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {level}: {message}", file=sys.stderr, flush=True)
-
-def find_meshroom() -> Optional[str]:
-    """Find Meshroom executable in common locations"""
-    for cmd in MESHROOM_POSSIBLE_PATHS:
-        if cmd and pathlib.Path(cmd).exists():
-            log_message(f"Found Meshroom at: {cmd}")
-            return str(pathlib.Path(cmd).resolve())
     
-    # Try to find in PATH
+    logger.debug(f"Updating status: {payload}")
+    print(json.dumps(payload), flush=True)
+    
+    if output_dir:
+        status_path = pathlib.Path(output_dir) / "status.json"
+        try:
+            with open(status_path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, indent=2)
+            logger.debug(f"Wrote status to {status_path}")
+        except Exception as e:
+            logger.error(f"Failed to write status.json: {e}")
+
+def check_cuda_available() -> bool:
+    """Check if CUDA is available"""
     try:
-        result = subprocess.run(['which', 'meshroom_batch'], capture_output=True, text=True)
+        result = subprocess.run(['nvidia-smi'], capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
-            path = result.stdout.strip()
-            log_message(f"Found Meshroom in PATH: {path}")
-            return path
+            logger.info("CUDA GPU detected")
+            return True
     except:
         pass
-    
+    logger.warning("No CUDA detected, using CPU")
+    return False
+
+def check_meshroom_version(meshroom_path: str) -> str:
+    """Check Meshroom version"""
+    try:
+        result = subprocess.run([meshroom_path, '--version'], capture_output=True, text=True, timeout=10)
+        version = result.stdout.strip()
+        logger.info(f"Meshroom version: {version}")
+        return version
+    except Exception as e:
+        logger.error(f"Failed to check Meshroom version: {e}")
+        return "unknown"
+
+def find_meshroom() -> Optional[str]:
+    """Find Meshroom executable, preferring meshroom_batch.exe"""
+    for cmd in MESHROOM_POSSIBLE_PATHS:
+        if cmd and pathlib.Path(cmd).exists() and 'meshroom_batch.exe' in cmd.lower():
+            logger.info(f"Found preferred Meshroom batch executable: {cmd}")
+            version = check_meshroom_version(cmd)
+            return str(pathlib.Path(cmd).resolve())
+    for cmd in MESHROOM_POSSIBLE_PATHS:
+        if cmd and pathlib.Path(cmd).exists():
+            logger.info(f"Found Meshroom executable: {cmd}")
+            version = check_meshroom_version(cmd)
+            return str(pathlib.Path(cmd).resolve())
+    logger.error("Meshroom executable not found")
     return None
 
 def validate_images(images: List[str]) -> List[str]:
-    """Validate and filter image files"""
+    """Validate images for Meshroom compatibility"""
     valid_images = []
     for img_path in images:
         path = pathlib.Path(img_path)
         if not path.exists():
-            log_message(f"Image file not found: {img_path}", "WARNING")
+            logger.warning(f"Image not found: {img_path}")
             continue
         
         if path.suffix.lower() not in SUPPORTED_FORMATS:
-            log_message(f"Unsupported image format: {img_path}", "WARNING")
+            logger.warning(f"Unsupported format: {img_path}")
             continue
         
-        # Check file size (minimum 1KB)
-        if path.stat().st_size < 1024:
-            log_message(f"Image file too small: {img_path}", "WARNING")
+        try:
+            if path.stat().st_size < 1024:
+                logger.warning(f"Image too small: {img_path}")
+                continue
+            
+            with Image.open(path) as img:
+                width, height = img.size
+                logger.info(f"Image {path.name}: {width}x{height}")
+                if width < 1024 or height < 1024:
+                    logger.warning(f"Image resolution too low (<1024x1024): {path.name}")
+                    continue
+            
+            with open(path, 'rb') as f:
+                tags = exifread.process_file(f, details=False)
+                if 'EXIF FocalLength' not in tags:
+                    logger.warning(f"No EXIF focal length for {path.name}")
+                    continue
+                if 'EXIF DateTimeOriginal' not in tags:
+                    logger.warning(f"No EXIF timestamp for {path.name}")
+        
+        except Exception as e:
+            logger.warning(f"Error validating {img_path}: {e}")
             continue
         
         valid_images.append(str(path.resolve()))
     
+    # Basic overlap check using timestamps
+    if len(valid_images) >= 4:
+        try:
+            timestamps = []
+            for img in valid_images:
+                with open(img, 'rb') as f:
+                    tags = exifread.process_file(f, details=False)
+                    if 'EXIF DateTimeOriginal' in tags:
+                        ts = tags['EXIF DateTimeOriginal'].values
+                        from datetime import datetime
+                        ts = datetime.strptime(ts, '%Y:%m:%d %H:%M:%S')
+                        timestamps.append(ts.timestamp())
+            timings = sorted(timestamps)
+            if timings and (timings[-1] - timings[0]) > 300:
+                logger.warning("Images have large time gaps, possible insufficient overlap")
+        except:
+            logger.warning("Could not check image timestamps for overlap")
+    
     return valid_images
 
-def prepare_input_folder(images: List[str]) -> pathlib.Path:
-    """Create a temporary folder with symlinks to images"""
+def create_input_folder(images: List[str]) -> pathlib.Path:
+    """Create temporary input folder with images"""
     temp_dir = pathlib.Path(tempfile.mkdtemp(prefix="meshroom_input_"))
-    log_message(f"Created temporary input folder: {temp_dir}")
+    logger.info(f"Created input folder: {temp_dir}")
     
     for i, img_path in enumerate(images):
         src = pathlib.Path(img_path)
-        # Create a clean filename
-        ext = src.suffix.lower()
-        dst = temp_dir / f"image_{i:04d}{ext}"
-        
+        base_name = src.stem
+        ext = src.suffix
+        dst = temp_dir / f"{base_name}_{i:03d}{ext}"
         try:
-            # Use copy instead of symlink for better compatibility
             shutil.copy2(src, dst)
-            log_message(f"Copied {src.name} -> {dst.name}")
+            logger.info(f"Copied {src.name} -> {dst.name}")
         except Exception as e:
-            log_message(f"Failed to copy {src}: {e}", "ERROR")
+            logger.error(f"Failed to copy {src}: {e}")
             raise
-    
     return temp_dir
 
 def cleanup_temp_folder(temp_dir: pathlib.Path) -> None:
@@ -112,11 +200,10 @@ def cleanup_temp_folder(temp_dir: pathlib.Path) -> None:
     try:
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
-            log_message(f"Cleaned up temporary folder: {temp_dir}")
+            logger.info(f"Cleaned up {temp_dir}")
     except Exception as e:
-        log_message(f"Failed to cleanup {temp_dir}: {e}", "WARNING")
+        logger.warning(f"Failed to cleanup {temp_dir}: {e}")
 
-# --------------------------------------------------------------------------- #
 class MeshroomProcessor:
     def __init__(self, project_id: str, model_name: str, images: List[str], output_dir: str):
         self.project_id = project_id
@@ -125,240 +212,307 @@ class MeshroomProcessor:
         self.output_dir = pathlib.Path(output_dir)
         self.meshroom = find_meshroom()
         self.temp_input_dir = None
+        self.cuda_available = check_cuda_available()
+        self.created_at = int(time.time() * 1000)
         
-        log_message(f"Initializing MeshroomProcessor for project: {project_id}")
-        log_message(f"Model name: {model_name}")
-        log_message(f"Number of images: {len(images)}")
-        log_message(f"Output directory: {output_dir}")
+        logger.info(f"Initializing project: {project_id}, model: {model_name}, images: {len(images)}, output: {output_dir}")
+
+    def _update_status_with_context(self, status: str, progress: int, error: str = None, obj_files: List[Dict[str, str]] = None):
+        """Update status with full context"""
+        update_status(
+            status=status,
+            progress=progress,
+            error=error,
+            output_dir=str(self.output_dir),
+            project_id=self.project_id,
+            model_name=self.model_name,
+            images=self.images,
+            created_at=self.created_at,
+            obj_files=obj_files
+        )
 
     def validate_prerequisites(self) -> None:
-        """Validate all prerequisites before processing"""
+        """Validate prerequisites"""
         if not self.images:
             raise ValueError("No images provided")
         
-        if len(self.images) < 2:
-            raise ValueError(f"At least 2 images required, got {len(self.images)}")
+        if len(self.images) < 4:
+            raise ValueError(f"Only {len(self.images)} images provided; need at least 4")
         
         if not self.meshroom:
-            raise FileNotFoundError("Meshroom executable not found. Please install Meshroom.")
+            raise FileNotFoundError("Meshroom executable not found")
         
-        # Validate images
-        valid_images = validate_images(self.images)
-        if len(valid_images) < 2:
-            raise ValueError(f"Only {len(valid_images)} valid images found, need at least 2")
+        self.images = validate_images(self.images)
+        if len(self.images) < 4:
+            raise ValueError(f"Only {len(self.images)} valid images found; need at least 4")
         
-        self.images = valid_images
-        log_message(f"Validated {len(self.images)} images")
+        logger.info(f"Validated {len(self.images)} images")
 
     def prepare_directories(self) -> None:
-        """Prepare output directories"""
+        """Prepare output and cache directories"""
         try:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             cache_dir = self.output_dir / "cache"
-            cache_dir.mkdir(exist_ok=True)
+            cache_dir.mkdir(parents=True, exist_ok=True)
             
-            log_message(f"Created output directory: {self.output_dir}")
-            log_message(f"Created cache directory: {cache_dir}")
+            if os.name == 'nt':
+                try:
+                    subprocess.run(['icacls', str(self.output_dir), '/grant', 'Everyone:(OI)(CI)F'], check=True, capture_output=True)
+                    subprocess.run(['icacls', str(cache_dir), '/grant', 'Everyone:(OI)(CI)F'], check=True, capture_output=True)
+                    logger.info(f"Set permissions for {self.output_dir} and {cache_dir}")
+                except subprocess.CalledProcessError as e:
+                    logger.warning(f"Failed to set permissions: {e}")
+            
+            # Check disk space
+            total, used, free = shutil.disk_usage(self.output_dir)
+            if free < 10 * 1024 * 1024 * 1024:  # Less than 10GB
+                logger.warning(f"Low disk space: {free / (1024**3):.2f} GB free")
         except Exception as e:
-            raise RuntimeError(f"Failed to create directories: {e}")
-
-    def build_meshroom_command(self) -> List[str]:
-        """Build the Meshroom command with proper parameters"""
-        cache_dir = self.output_dir / "cache"
-        project_file = self.output_dir / "project.mg"
-        
-        # Use individual image files instead of folder
-        cmd = [
-            self.meshroom,
-            "--input"
-        ]
-        
-        # Add all image files individually
-        for img in self.images:
-            cmd.append(str(img))
-        
-        cmd.extend([
-            "--cache", str(cache_dir),
-            "--output", str(self.output_dir),
-            "--save", str(project_file),
-            "--verbose", "info"
-        ])
-        
-        # Add pipeline if available
-        try:
-            # Check if pipeline parameter is supported
-            help_result = subprocess.run([self.meshroom, "--help"], 
-                                       capture_output=True, text=True, timeout=10)
-            if "--pipeline" in help_result.stdout:
-                cmd.extend(["--pipeline", "photogrammetry"])
-        except:
-            pass
-        
-        return cmd
+            raise RuntimeError(f"Failed to prepare directories: {e}")
 
     def run_meshroom(self) -> None:
-        """Execute Meshroom with proper error handling"""
-        cmd = self.build_meshroom_command()
+        """Run Meshroom with simple input/output"""
+        logger.info("Executing Meshroom...")
+        self.temp_input_dir = create_input_folder(self.images)
+        cmd = [self.meshroom, "-i", str(self.temp_input_dir), "-o", str(self.output_dir), "--verbose", "info"]
         
-        log_message(f"Executing Meshroom command: {' '.join(cmd)}")
+        env = os.environ.copy()
+        if self.cuda_available:
+            env['CUDA_VISIBLE_DEVICES'] = '0'
+            env['MESHROOM_USE_CUDA'] = '1'
+        else:
+            env['MESHROOM_FORCE_CPU'] = '1'
+        
+        log_file = self.output_dir / "meshroom_log.txt"
+        logger.info(f"Logging to: {log_file}")
         
         try:
-            # Start process
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                cwd=str(self.output_dir)
-            )
-            
-            # Monitor output
-            output_lines = []
-            while True:
-                line = proc.stdout.readline()
-                if not line and proc.poll() is not None:
-                    break
-                if line:
-                    line = line.rstrip()
-                    output_lines.append(line)
-                    log_message(f"Meshroom: {line}")
-                    
-                    # Update progress based on output
-                    if "DepthMap" in line:
-                        update_status("processing", 40)
-                    elif "Meshing" in line:
-                        update_status("processing", 70)
-                    elif "Texturing" in line:
-                        update_status("processing", 90)
-            
-            # Wait for completion
-            proc.wait()
-            
-            if proc.returncode != 0:
-                error_msg = f"Meshroom failed with exit code {proc.returncode}"
-                if output_lines:
-                    # Get last few lines for error context
-                    error_context = "\n".join(output_lines[-10:])
-                    error_msg += f"\nLast output:\n{error_context}"
-                raise subprocess.CalledProcessError(proc.returncode, cmd, error_msg)
-            
-            log_message("Meshroom completed successfully")
-            
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            raise RuntimeError("Meshroom process timed out")
-        except Exception as e:
-            raise RuntimeError(f"Meshroom execution failed: {e}")
+            with open(log_file, 'w', encoding='utf-8') as f_log:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    cwd=str(self.output_dir),
+                    env=env,
+                    bufsize=1
+                )
+                
+                output_lines = []
+                progress_patterns = [
+                    (r'(\d+)%', lambda x: int(x)),
+                    (r'(\d+)/(\d+)', lambda x: int((int(x[0]) / int(x[1])) * 100)),
+                    (r'CameraInit.*completed', 20),
+                    (r'FeatureExtraction.*completed', 30),
+                    (r'FeatureMatching.*completed', 40),
+                    (r'StructureFromMotion.*completed', 50),
+                    (r'PrepareDenseScene.*completed', 60),
+                    (r'DepthMap.*completed', 70),
+                    (r'Meshing.*completed', 80),
+                    (r'MeshFiltering.*completed', 85),
+                    (r'Texturing.*completed', 95)
+                ]
+                error_patterns = [
+                    (r'No valid camera found', "Images lack valid EXIF data"),
+                    (r'Failed to find.*matches', "Insufficient image overlap or quality"),
+                    (r'CUDA.*error', "CUDA failure, retrying with CPU"),
+                    (r'No 3D points', "StructureFromMotion failed"),
+                    (r'Failed to open file', "File access error"),
+                    (r'Invalid parameter', "Invalid Meshroom command parameters"),
+                    (r'Failed to initialize.*pipeline', "Meshroom pipeline initialization failed"),
+                    (r'Out of memory', "Insufficient memory or disk space")
+                ]
+                
+                while True:
+                    line = proc.stdout.readline()
+                    if not line and proc.poll() is not None:
+                        break
+                    if line:
+                        line = line.rstrip()
+                        output_lines.append(line)
+                        f_log.write(line + "\n")
+                        f_log.flush()
+                        logger.debug(f"Meshroom: {line}")
+                        
+                        for pattern, error_msg in error_patterns:
+                            if re.search(pattern, line, re.IGNORECASE):
+                                logger.error(f"Error: {error_msg}")
+                                if "CUDA" in error_msg and self.cuda_available:
+                                    logger.info("Retrying without CUDA...")
+                                    env['MESHROOM_FORCE_CPU'] = '1'
+                                    env.pop('CUDA_VISIBLE_DEVICES', None)
+                                    env.pop('MESHROOM_USE_CUDA', None)
+                                    self.cuda_available = False
+                                    proc.kill()
+                                    proc = subprocess.Popen(
+                                        cmd,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT,
+                                        text=True,
+                                        cwd=str(self.output_dir),
+                                        env=env,
+                                        bufsize=1
+                                    )
+                                    output_lines = []
+                                    continue
+                                raise RuntimeError(error_msg)
+                        
+                        for pattern, progress_func in progress_patterns:
+                            match = re.search(pattern, line, re.IGNORECASE)
+                            if match:
+                                try:
+                                    if callable(progress_func):
+                                        if len(match.groups()) == 1:
+                                            progress = progress_func(match.group(1))
+                                        else:
+                                            progress = progress_func(match.groups())
+                                    else:
+                                        progress = progress_func
+                                    progress = max(20, min(95, progress))
+                                    self._update_status_with_context("processing", progress)
+                                    break
+                                except:
+                                    pass
+                
+                return_code = proc.wait()
+                if return_code != 0:
+                    error_msg = "\n".join(output_lines[-50:]) if output_lines else "No output captured"
+                    f_log.write(f"Command failed with exit code {return_code}\nLast output:\n{error_msg}\n")
+                    f_log.flush()
+                    raise subprocess.CalledProcessError(return_code, cmd, error_msg)
+        
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Meshroom failed: {e.output}")
+            raise RuntimeError(f"Meshroom execution failed: {e.output}")
 
-    def verify_output(self) -> None:
-        """Verify that required output files were created"""
-        required_files = [
-            "texturedMesh.obj",
-            "texturedMesh.mtl"
+    def find_and_copy_output_files(self) -> List[Dict[str, str]]:
+        """Find and copy output files"""
+        search_dirs = [
+            self.output_dir,
+            self.output_dir / "MeshroomCache",
+            self.output_dir / "cache",
+            self.output_dir / "MeshroomCache" / "Texturing",
+            self.output_dir / "cache" / "Texturing"
         ]
         
-        missing_files = []
-        for filename in required_files:
-            file_path = self.output_dir / filename
-            if not file_path.exists():
-                missing_files.append(filename)
+        obj_files = []
+        mtl_files = []
+        for search_dir in search_dirs:
+            if search_dir.exists():
+                obj_files.extend(search_dir.rglob("*.obj"))
+                mtl_files.extend(search_dir.rglob("*.mtl"))
         
-        if missing_files:
-            # Check for alternative output locations
-            for subdir in ["MeshroomCache", "Texturing"]:
-                subdir_path = self.output_dir / subdir
-                if subdir_path.exists():
-                    for filename in missing_files[:]:
-                        alt_path = subdir_path / filename
-                        if alt_path.exists():
-                            # Move file to expected location
-                            shutil.copy2(alt_path, self.output_dir / filename)
-                            missing_files.remove(filename)
-                            log_message(f"Found and moved {filename} from {subdir}")
+        result = []
+        if obj_files:
+            best_obj = max(obj_files, key=lambda f: f.stat().st_size)
+            target_obj = self.output_dir / f"{self.model_name}.obj"
+            shutil.copy2(best_obj, target_obj)
+            logger.info(f"Copied OBJ: {best_obj} -> {target_obj}")
+            result.append({"filename": f"{self.model_name}.obj", "type": "mesh"})
         
-        if missing_files:
-            # List all files in output directory for debugging
-            all_files = []
-            for item in self.output_dir.rglob("*"):
-                if item.is_file():
-                    all_files.append(str(item.relative_to(self.output_dir)))
-            
-            log_message(f"Files in output directory: {all_files}")
-            raise RuntimeError(f"Missing required output files: {missing_files}")
+        if mtl_files:
+            best_mtl = max(mtl_files, key=lambda f: f.stat().st_size)
+            target_mtl = self.output_dir / f"{self.model_name}.mtl"
+            shutil.copy2(best_mtl, target_mtl)
+            logger.info(f"Copied MTL: {best_mtl} -> {target_mtl}")
+            result.append({"filename": f"{self.model_name}.mtl", "type": "material"})
         
-        log_message("All required output files verified")
+        texture_files = []
+        for search_dir in search_dirs:
+            if search_dir.exists():
+                texture_files.extend(search_dir.rglob("*.png"))
+                texture_files.extend(search_dir.rglob("*.jpg"))
+        
+        for tex_file in texture_files:
+            target_tex = self.output_dir / tex_file.name
+            shutil.copy2(tex_file, target_tex)
+            logger.info(f"Copied texture: {tex_file} -> {target_tex}")
+            result.append({"filename": tex_file.name, "type": "texture"})
+        
+        self.cleanup_extra_files()
+        return result
+
+    def cleanup_extra_files(self) -> None:
+        """Keep only OBJ, MTL, and textures"""
+        keep_extensions = {".obj", ".mtl", ".png", ".jpg", ".json"}
+        keep_files = {f"{self.model_name}.obj", f"{self.model_name}.mtl", "status.json"}
+        for item in self.output_dir.iterdir():
+            if item.is_file() and (item.name not in keep_files and item.suffix.lower() not in keep_extensions):
+                try:
+                    item.unlink()
+                    logger.info(f"Removed file: {item}")
+                except:
+                    pass
+            elif item.is_dir() and item.name not in {"cache", "MeshroomCache"}:
+                try:
+                    shutil.rmtree(item)
+                    logger.info(f"Removed directory: {item}")
+                except:
+                    pass
+
+    def verify_output(self) -> None:
+        """Verify output files"""
+        obj_files = self.find_and_copy_output_files()
+        obj_file = self.output_dir / f"{self.model_name}.obj"
+        if not obj_file.exists():
+            all_files = list(self.output_dir.rglob("*"))
+            file_list = [f"{f.relative_to(self.output_dir)} ({f.stat().st_size} bytes)" 
+                        for f in all_files if f.is_file()]
+            logger.error(f"Output files: {file_list}")
+            raise RuntimeError("No OBJ file generated. Check image quality or Meshroom logs.")
+        
+        obj_size = obj_file.stat().st_size
+        if obj_size < 1000:
+            raise RuntimeError(f"OBJ file too small ({obj_size} bytes)")
+        
+        logger.info(f"Generated OBJ: {obj_size} bytes")
+        self._update_status_with_context("completed", 100, obj_files=obj_files)
 
     def run(self) -> None:
-        """Main processing pipeline"""
+        """Main pipeline"""
         try:
-            update_status("processing", 5)
-            
-            # Validate prerequisites
+            self._update_status_with_context("processing", 5)
             self.validate_prerequisites()
-            update_status("processing", 10)
-            
-            # Prepare directories
+            self._update_status_with_context("processing", 10)
             self.prepare_directories()
-            update_status("processing", 15)
-            
-            # Run Meshroom
-            log_message("Starting Meshroom processing...")
+            self._update_status_with_context("processing", 15)
             self.run_meshroom()
-            update_status("processing", 95)
-            
-            # Verify output
+            self._update_status_with_context("processing", 98)
             self.verify_output()
-            update_status("completed", 100)
-            
-            log_message("Processing completed successfully")
-            
+            logger.info("Processing completed")
         except Exception as e:
-            error_msg = str(e)
-            log_message(f"Processing failed: {error_msg}", "ERROR")
-            update_status("failed", 50, error_msg)
+            logger.error(f"Processing failed: {e}")
+            self._update_status_with_context("failed", 50, str(e))
             raise
         finally:
-            # Cleanup temporary files
             if self.temp_input_dir and self.temp_input_dir.exists():
                 cleanup_temp_folder(self.temp_input_dir)
 
-# --------------------------------------------------------------------------- #
 def main() -> None:
     """Main entry point"""
-    parser = argparse.ArgumentParser(description="Enhanced Meshroom head-less worker")
+    parser = argparse.ArgumentParser(description="Meshroom worker")
     parser.add_argument("--project-id", required=True, help="Project ID")
     parser.add_argument("--model-name", required=True, help="Model name")
-    parser.add_argument("--images", required=True, help="JSON list of absolute image paths")
+    parser.add_argument("--images", required=True, help="JSON list of image paths")
     parser.add_argument("--output-dir", required=True, help="Output directory")
     
     args = parser.parse_args()
-    
-    log_message("Starting Meshroom processor...")
-    log_message(f"Project ID: {args.project_id}")
-    log_message(f"Model name: {args.model_name}")
-    log_message(f"Output directory: {args.output_dir}")
+    logger.info("Starting Meshroom processor...")
     
     try:
-        # Parse images JSON
         images = json.loads(args.images)
-        log_message(f"Parsed {len(images)} image paths")
-        
+        logger.info(f"Parsed {len(images)} images")
     except json.JSONDecodeError as e:
-        error_msg = f"Invalid JSON in images parameter: {e}"
-        log_message(error_msg, "ERROR")
-        update_status("failed", 5, error_msg)
+        error_msg = f"Invalid JSON in images: {e}"
+        logger.error(error_msg)
+        update_status("failed", 5, error_msg, args.output_dir, args.project_id, args.model_name)
         sys.exit(1)
     
-    # Create and run processor
     worker = MeshroomProcessor(args.project_id, args.model_name, images, args.output_dir)
-    
     try:
         worker.run()
-        log_message("Processing completed successfully")
-    except SystemExit:
-        raise
     except Exception as e:
-        log_message(f"Processing failed with exception: {e}", "ERROR")
+        logger.error(f"Fatal error: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":
